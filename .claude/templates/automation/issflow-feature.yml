@@ -1,0 +1,81 @@
+# iStartSoftFlow — headless feature lane (GitHub Actions).
+# Installed by `npx create-issflow --ci` as .github/workflows/issflow-feature.yml.
+#
+# Two triggers:
+#   1. Label an issue `feature:approved` — the issue TITLE becomes the slug and
+#      the issue BODY becomes docs/features/<slug>/FEATURE.md. The body must
+#      already carry the `> Approval:` / `> Automation:` headers (/feature step 0b);
+#      the label is the human act that fires the run.
+#   2. Manual dispatch with the path of a Feature doc already committed.
+#
+# The run pushes feature/<slug> and opens a PR when the doc says
+# `> Automation: push+pr`. It NEVER merges and NEVER deploys — UAT + merge stay human.
+#
+# Setup: repo secret ANTHROPIC_API_KEY. Grant Actions "Read and write permissions"
+# (Settings → Actions → General → Workflow permissions) so the run can push + open PRs.
+
+name: issflow-feature
+
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      feature_doc:
+        description: Path to the approved Feature doc (docs/features/<slug>/FEATURE.md)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  feature:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'feature:approved'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Issue trigger: materialize the issue body as the Feature doc.
+      - name: Write Feature doc from issue
+        if: github.event_name == 'issues'
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          slug=$(printf '%s' "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g')
+          test -n "$slug"
+          mkdir -p "docs/features/$slug"
+          printf '%s\n' "$ISSUE_BODY" > "docs/features/$slug/FEATURE.md"
+          echo "FEATURE_DOC=docs/features/$slug/FEATURE.md" >> "$GITHUB_ENV"
+
+      - name: Resolve Feature doc path
+        if: github.event_name == 'workflow_dispatch'
+        run: echo "FEATURE_DOC=${{ inputs.feature_doc }}" >> "$GITHUB_ENV"
+
+      - name: Run the feature lane
+        uses: anthropics/claude-code-action@v1
+        env:
+          ISSFLOW_HEADLESS: "1"
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: "/feature ${{ env.FEATURE_DOC }}"
+          # Ephemeral runner = the sandbox; the Stop hook (feature-gate.js) still
+          # enforces the gate checklist inside the run.
+          claude_args: "--dangerously-skip-permissions"
+
+      # The lane's own delivery step (git push / PR) runs inside Claude per the
+      # doc's `> Automation:` header. This job only reports.
+      - name: Report back to the issue
+        if: github.event_name == 'issues' && always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue comment ${{ github.event.issue.number }} \
+            --body "issflow-feature run finished: ${{ job.status }}. See the run log + the feature/<slug> branch. Next: /uat with docs/features/<slug>/TEST-PLAN.md."
