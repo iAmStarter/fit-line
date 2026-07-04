@@ -12,7 +12,7 @@ import typescript from '@rollup/plugin-typescript';
 //
 // Only entry points that are actually exported are hoisted, so no
 // ReferenceError on absent handlers.
-const GAS_ENTRY_POINTS = ['doPost', 'doGet'];
+const GAS_ENTRY_POINTS = ['doPost', 'doGet', 'setupProject'];
 
 const hoist = GAS_ENTRY_POINTS.map(
   (fn) => `if (App.${fn}) _gasGlobal.${fn} = App.${fn};`

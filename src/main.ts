@@ -561,3 +561,62 @@ function isLockTimeout(err: unknown): boolean {
   // failure carries neither → sheet-error card instead.
   return message.includes('lock') || message.includes('timeout');
 }
+
+/**
+ * ONE-TIME owner setup — run from the Apps Script editor (Run > setupProject),
+ * NOT part of the webhook request path. It (1) creates the backing Google Sheet
+ * `fit-webhook-data` with the 4 tabs (submissions / employees / roster /
+ * disputes) + header rows, and (2) sets the NON-secret Script Properties
+ * (SHEET_ID, OCR_BASE_URL). Running it also grants the script's OAuth scope
+ * consent for the deploying user — which is what flips the deployed /exec Web
+ * App from 403 to live. Secrets (LINE_CHANNEL_SECRET, LINE_CHANNEL_ACCESS_TOKEN,
+ * OCR_TOKEN) are NOT set here — enter those manually in Project Settings >
+ * Script Properties. Idempotent: re-running reuses the existing SHEET_ID.
+ */
+export function setupProject(): void {
+  const props = PropertiesService.getScriptProperties();
+  const existing = props.getProperty('SHEET_ID');
+  const ss = existing
+    ? SpreadsheetApp.openById(existing)
+    : SpreadsheetApp.create('fit-webhook-data');
+
+  const tabs = [
+    {
+      name: 'submissions',
+      headers: [
+        'messageId', 'userId', 'name', 'activityType', 'activityDateISO',
+        'submittedAtISO', 'activeCaloriesKcal', 'totalCaloriesKcal', 'distanceKm',
+        'source', 'confidence', 'status', 'rejectReason', 'imageHash',
+      ],
+    },
+    { name: 'employees', headers: ['userId', 'name', 'registeredAtISO'] },
+    { name: 'roster', headers: ['userId', 'name'] },
+    {
+      name: 'disputes',
+      headers: ['messageId', 'userId', 'activityType', 'reason', 'disputedAtISO'],
+    },
+  ];
+
+  for (let i = 0; i < tabs.length; i++) {
+    const t = tabs[i];
+    const sheet = ss.getSheetByName(t.name) || ss.insertSheet(t.name);
+    if (!sheet.getRange(1, 1).getValue()) {
+      sheet.getRange(1, 1, 1, t.headers.length).setValues([t.headers]);
+    }
+  }
+
+  if (!existing) {
+    const def = ss.getSheetByName('Sheet1');
+    if (def) ss.deleteSheet(def);
+  }
+
+  props.setProperty('SHEET_ID', ss.getId());
+  props.setProperty('OCR_BASE_URL', 'https://fit-ocr.istartsoft.dev');
+
+  Logger.log('SETUP DONE — SHEET_ID=' + ss.getId());
+  Logger.log('Sheet URL=' + ss.getUrl());
+  Logger.log(
+    'Now set the SECRETS in Project Settings > Script Properties: ' +
+      'LINE_CHANNEL_SECRET, LINE_CHANNEL_ACCESS_TOKEN, OCR_TOKEN',
+  );
+}
