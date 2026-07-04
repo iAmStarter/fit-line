@@ -52,4 +52,5 @@ Fit-OCR API · LINE fees/paid tier · HR identity integration · LIFF/native · 
 
 ## Sign-off
 
-approved by: ___  date: ___  version: v1
+approved by: **Theerasak Duangkaew (owner)**  date: **2026-07-04**  version: v1
+scope approved: **Core (P0+P1+P2+Integration) + P3 stretch** — ทั้งหมด

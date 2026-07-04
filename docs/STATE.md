@@ -1,9 +1,9 @@
 # STATE
 
 phase: 0 (pending)
-plan: PENDING (รอ human approve proposal → เป็น plan sign-off ด้วย)
-completed: project bootstrapped — double grill + design research done · OVERVIEW.md เขียนแล้ว · PROPOSAL.md + proposal-full.html + proposal-design.html (mockup 4 การ์ด semantic-color, animated system flow, plan/estimate, bar chart จริง, charset ฝัง, 0 emoji)
-blocker: รอ human อนุมัติ proposal (commercial+plan gate)
+plan: APPROVED 2026-07-04 (owner approved proposal = plan sign-off; scope = Core P0+P1+P2+Integration + P3 stretch ทั้งหมด)
+completed: project bootstrapped — double grill + design research done · OVERVIEW.md เขียนแล้ว · PROPOSAL.md (approved+stamped) + proposal-full.html + proposal-design.html · pushed → github.com/iAmStarter/fit-line · GitHub Pages live (serve /docs)
+blocker: none — เดินหน้า planner → PLAN.md ได้
 
 ## Locked decisions (จาก grill+research)
 - LINE webhook consumer (GAS) · sync + reply-token (ฟรีทุก scale) · Thai docs · AUTO mode
