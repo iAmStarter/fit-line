@@ -20,6 +20,10 @@ import { getProp, PROP_KEYS } from '../config/props';
 const LINE_CONTENT_BASE = 'https://api-data.line.me/v2/bot/message';
 /** LINE reply endpoint. */
 const LINE_REPLY_URL = 'https://api.line.me/v2/bot/message/reply';
+/** LINE loading-indicator endpoint (typing animation in 1:1 chats). */
+const LINE_LOADING_URL = 'https://api.line.me/v2/bot/chat/loading/start';
+/** Loading duration (5–60, multiple of 5); clears early when we reply. */
+const LOADING_SECONDS = 30;
 /** UrlFetchApp timeout — fits well under the LINE reply-token window. */
 const FETCH_TIMEOUT_SECONDS = 10;
 
@@ -44,6 +48,37 @@ export function getMessageContent(
     } as GoogleAppsScript.URL_Fetch.URLFetchRequestOptions
   );
   return response.getBlob();
+}
+
+/**
+ * Show the LINE loading animation ("...") in a 1:1 chat so the user can see the
+ * bot is working during the synchronous OCR wait. Cosmetic + best-effort: it
+ * clears automatically when we reply (or after `LOADING_SECONDS`). 1:1 user
+ * chats only. NEVER throws — a loading failure must not affect processing.
+ * @param userId the sender's userId (used as `chatId`).
+ * @param seconds loading duration (5–60, multiple of 5).
+ */
+export function startLoading(
+  userId: string,
+  seconds: number = LOADING_SECONDS
+): void {
+  try {
+    const accessToken = getProp(PROP_KEYS.LINE_CHANNEL_ACCESS_TOKEN);
+    UrlFetchApp.fetch(LINE_LOADING_URL, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { Authorization: `Bearer ${accessToken}` },
+      payload: JSON.stringify({ chatId: userId, loadingSeconds: seconds }),
+      muteHttpExceptions: true,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      fetchTimeoutSeconds: FETCH_TIMEOUT_SECONDS,
+    } as GoogleAppsScript.URL_Fetch.URLFetchRequestOptions);
+  } catch (err) {
+    Logger.log(
+      'startLoading failed (non-fatal): ' +
+        (err instanceof Error ? err.message : String(err))
+    );
+  }
 }
 
 /**

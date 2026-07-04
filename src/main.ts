@@ -16,7 +16,7 @@
 
 import { verifySignature } from './line/signature';
 import { getProp, PROP_KEYS } from './config/props';
-import { getMessageContent, reply } from './line/lineClient';
+import { getMessageContent, reply, startLoading } from './line/lineClient';
 import { getRecognizer } from './ocr/ocrClient';
 import { evaluateSubmissionRules } from './rules/rulePipeline';
 import { buildRejectCard, buildBlockNoticeCard } from './line/flex/reject';
@@ -240,6 +240,11 @@ export function handleImageMessage(event: LineWebhookEvent): void {
   }
 
   const userId = event.source?.userId ?? '';
+
+  // Show the LINE loading animation ("...") immediately so the user can see the
+  // bot is working during the synchronous OCR wait. Best-effort, 1:1 chats only;
+  // it clears automatically when we reply below.
+  if (userId) startLoading(userId);
 
   try {
     // 1. Download the image immediately (availability window not guaranteed).
