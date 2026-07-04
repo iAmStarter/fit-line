@@ -17,6 +17,7 @@
 import { verifySignature } from './line/signature';
 import { getProp, PROP_KEYS } from './config/props';
 import { getMessageContent, reply, startLoading } from './line/lineClient';
+import { logToSheet } from './sheet/sheetLog';
 import { getRecognizer } from './ocr/ocrClient';
 import { evaluateSubmissionRules } from './rules/rulePipeline';
 import { buildRejectCard, buildBlockNoticeCard } from './line/flex/reject';
@@ -256,6 +257,7 @@ export function handleImageMessage(event: LineWebhookEvent): void {
       reply(replyToken, [
         buildBlockNoticeCard(COOLDOWN_TEXT, { cameraRoll: true }),
       ]);
+      logToSheet('info', 'blocked_ratelimit', userId, messageId);
       return;
     }
 
@@ -267,6 +269,7 @@ export function handleImageMessage(event: LineWebhookEvent): void {
       reply(replyToken, [
         buildBlockNoticeCard(DUPLICATE_IMAGE_TEXT, { cameraRoll: true }),
       ]);
+      logToSheet('info', 'blocked_duplicate', userId, messageId, imageHash);
       return;
     }
 
@@ -310,6 +313,13 @@ export function handleImageMessage(event: LineWebhookEvent): void {
         const counts = countSubmissions(userId, todayISO);
         const daily = recentDailyValues(userId, todayISO);
         reply(replyToken, [buildSuccessCard(ctx, counts, daily)]);
+        logToSheet(
+          'info',
+          'recorded',
+          userId,
+          messageId,
+          `cal=${metrics.activeCaloriesKcal ?? metrics.totalCaloriesKcal ?? ''} date=${metrics.activityDateISO ?? ''} activity=${metrics.activityType ?? ''}`
+        );
       } catch (writeErr) {
         // Lock timeout → "ระบบไม่ว่าง ลองใหม่" (system-busy, no cameraRoll — an
         // immediate resend does not help); a Sheet-write failure → "บันทึกไม่สำเร็จ
@@ -324,6 +334,13 @@ export function handleImageMessage(event: LineWebhookEvent): void {
             ? buildBlockNoticeCard(LOCK_TIMEOUT_TEXT)
             : buildSheetErrorCard(),
         ]);
+        logToSheet(
+          'error',
+          isLockTimeout(writeErr) ? 'lock_timeout' : 'sheet_error',
+          userId,
+          messageId,
+          writeErr instanceof Error ? writeErr.message : String(writeErr)
+        );
       }
     } else {
       // Fail → reply a reject card. Bump the per-(user, activity) reject-streak
@@ -342,11 +359,25 @@ export function handleImageMessage(event: LineWebhookEvent): void {
           disputeMessageId,
         }),
       ]);
+      logToSheet(
+        'info',
+        'rejected',
+        userId,
+        messageId,
+        result.reason ?? 'ไม่ผ่านเงื่อนไข'
+      );
     }
   } catch (err) {
     // OCR/network error → graceful error card. Never throw out (doPost = 200).
     Logger.log(
       `handleImageMessage error: ${err instanceof Error ? err.message : err}`
+    );
+    logToSheet(
+      'error',
+      'ocr_error',
+      userId,
+      messageId,
+      err instanceof Error ? err.message : String(err)
     );
     try {
       reply(replyToken, [buildErrorCard()]);
@@ -602,6 +633,10 @@ export function setupProject(): void {
     {
       name: 'disputes',
       headers: ['messageId', 'userId', 'activityType', 'reason', 'disputedAtISO'],
+    },
+    {
+      name: 'logs',
+      headers: ['timestamp', 'level', 'event', 'userId', 'messageId', 'detail'],
     },
   ];
 
