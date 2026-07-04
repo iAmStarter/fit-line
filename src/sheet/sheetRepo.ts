@@ -22,8 +22,7 @@
  */
 
 import { getProp, PROP_KEYS } from '../config/props';
-import type { StashedContext } from '../state/cacheStore';
-import type { SubmissionCounts } from '../types/ocrMetrics';
+import type { StashedContext, SubmissionCounts } from '../types/ocrMetrics';
 
 /** `submissions` tab name. */
 const SUBMISSIONS_TAB = 'submissions';

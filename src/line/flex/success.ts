@@ -14,8 +14,7 @@
  * SCAFFOLD (Phase 2): signature only — body throws NotImplemented.
  */
 
-import type { StashedContext } from '../../state/cacheStore';
-import type { SubmissionCounts } from '../../types/ocrMetrics';
+import type { StashedContext, SubmissionCounts } from '../../types/ocrMetrics';
 import { buildBarChart } from './chart';
 
 /** Success semantic color (OVERVIEW §4). */

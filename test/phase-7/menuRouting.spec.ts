@@ -2,45 +2,39 @@
  * test/phase-7/menuRouting.spec.ts — phase-local integration: rich-menu postback
  * routing through handlePostback.
  *
- * RED-first (Phase 7 FINAL, TDD). Drives handlePostback over stateful GAS doubles
- * with ONLY the LINE reply seam mocked, exercising the REAL Phase-7 branches
- * (which call buildTriggerCard / buildSummaryCard / resolveEmployeeName / the
- * confirm write path — all throw NotImplemented now → RED, GREEN after FILL).
- * Asserts BEHAVIOR from PLAN Phase 7 acceptance (lines 160, 162):
+ * Drives handlePostback over stateful GAS doubles with ONLY the LINE reply seam
+ * mocked, exercising the REAL Phase-7 branches (buildTriggerCard / buildSummaryCard
+ * / resolveEmployeeName). Asserts BEHAVIOR from PLAN Phase 7 acceptance (lines 160,
+ * 162), updated for CR-1 / Phase 8 (the `action=confirm` write branch is REMOVED —
+ * writes now happen on the image path):
  *
  *   - action=help    → reply is the TRIGGER card (how-to "วิธีส่งรูป" + cameraRoll).
  *   - action=summary → reply is a SUMMARY card built from THAT user's counts +
  *     7-day dailies (summary line "สัปดาห์นี้…เดือนนี้…รวม…" + bar chart) and,
  *     being stats-only, carries NO save-ack "บันทึกแล้ว".
  *   - action=zzz (unknown) → NO reply AND does NOT throw (doPost stays 200).
- *   - action=confirm&id=… (normal write) → routes to the CONFIRM path (a
- *     submissions row is written + the success card replied) and NEVER to the
- *     help/summary branch. The success card is the terminal ack "บันทึกแล้ว" AND
- *     (per Phase 5 acceptance, PLAN line 122) carries the running summary line
- *     "สัปดาห์นี้ N · เดือนนี้ N · รวม N" + bar chart. The distinguisher between
- *     the two cards is therefore "บันทึกแล้ว" (success-only), NOT the summary
- *     line (which BOTH cards render) — see buildSuccessCard.
+ *   - action=confirm&id=… (LEGACY) → graceful IGNORE: NO write, NO reply, no throw
+ *     (the confirm step is gone; passing images auto-save on the image path). The
+ *     save-path + running-summary coverage now lives in the image-path suites
+ *     (router / imageGate / phase-8 autoSave), not here.
  *
  * MOCK suite: external boundaries mocked are (a) LINE reply and (b) the GAS
- * SpreadsheetApp + CacheService + LockService doubles. The routing logic
- * (parse action → branch → build card) runs REAL, so a mis-route genuinely fails
- * here. mock/real flag: GAS services have no cheap Node analogue → these stateful
- * doubles ARE the real boundary; the SAME assertions run. We never read the impl
- * bodies — only public signatures.
+ * SpreadsheetApp + CacheService + LockService doubles. The routing logic runs REAL,
+ * so a mis-route genuinely fails here. mock/real flag: GAS services have no cheap
+ * Node analogue → these stateful doubles ARE the real boundary; the SAME assertions
+ * run. We never read the impl bodies — only public signatures.
  */
 
 import { handlePostback } from '../../src/main';
 import type { LineWebhookEvent } from '../../src/main';
-import { stashSubmission } from '../../src/state/cacheStore';
 import * as lineClient from '../../src/line/lineClient';
-import { makeStashedContext } from '../support/stashFixture';
 
 // Mock ONLY the LINE reply network seam. Sheet + Cache + Lock are stateful GAS
 // doubles below; the Phase-7 routing + card builders run REAL.
 jest.mock('../../src/line/lineClient');
 
-// Neutralise the Phase-3 write-path lock wrapper so the confirm branch runs its
-// body synchronously (so the confirm test exercises the real write path).
+// Neutralise the script-lock wrapper (kept harmless; a legacy confirm must never
+// reach a write anyway).
 jest.mock('../../src/state/lock', () => ({
   LOCK_WAIT_MS: 10000,
   withScriptLock: <T>(fn: () => T): T => fn(),
@@ -120,7 +114,6 @@ function installEnv(existingSubmissions: unknown[][] = []): void {
     setProperty: jest.fn(),
     getProperties: jest.fn((): Record<string, string> => ({})),
   });
-  // Stateful CacheService so the confirm-branch stash/retrieve works.
   const store = new Map<string, string>();
   g.CacheService.getScriptCache.mockReturnValue({
     put: jest.fn((k: string, v: string): void => {
@@ -162,6 +155,11 @@ function postbackEvent(data: string, userId = 'U1'): LineWebhookEvent {
 beforeEach(() => {
   jest.clearAllMocks();
   installEnv();
+  mockedLine.reply.mockImplementation(() => undefined);
+});
+
+afterEach(() => {
+  jest.restoreAllMocks();
 });
 
 describe('handlePostback — action=help routes to the trigger card', () => {
@@ -203,10 +201,8 @@ describe('handlePostback — action=summary routes to the summary card', () => {
     expect(json).toContain('รวม');
     // No external URL — the chart is native Flex boxes (privacy-safe).
     expect(json.toLowerCase()).not.toContain('http');
-    // DISTINGUISHER: the summary card is stats-only — it is NOT the write-path
-    // ack, so it must NOT carry the "บันทึกแล้ว" save-confirmation headline (that
-    // belongs to the confirm success card alone). Phase 5: both cards render the
-    // summary line, so "บันทึกแล้ว" — not the summary — is what tells them apart.
+    // DISTINGUISHER: the summary card is stats-only — NOT the write-path ack, so it
+    // must NOT carry the "บันทึกแล้ว" save-confirmation headline.
     expect(json).not.toContain('บันทึกแล้ว');
   });
 });
@@ -218,11 +214,10 @@ describe('handlePostback — unknown action is ignored gracefully', () => {
   });
 });
 
-describe('handlePostback — a normal confirm postback stays on the write path', () => {
-  it('action=confirm&id=… writes the submission + replies the success card (ack + running summary), NOT help', () => {
-    // Seed two prior recorded rows for U1 this week so the running summary on the
-    // success card is non-zero + computable (Phase 5: count is taken AFTER the
-    // new row is inserted, so week/total render ≥ 3 once this confirm writes).
+describe('handlePostback — a LEGACY action=confirm is ignored gracefully', () => {
+  it('action=confirm&id=… → NO write, NO reply, does NOT throw (write moved to the image path)', () => {
+    // Seed prior rows so that IF a stray confirm wrongly wrote, the failure is
+    // unambiguous (an extra append / a success reply would show up).
     const todayISO = '2026-07-04';
     installEnv([
       subRow({
@@ -232,38 +227,14 @@ describe('handlePostback — a normal confirm postback stays on the write path',
         activeCaloriesKcal: 200,
         status: 'recorded',
       }),
-      subRow({
-        messageId: 'p2',
-        userId: 'U1',
-        activityDateISO: todayISO,
-        activeCaloriesKcal: 150,
-        status: 'recorded',
-      }),
     ]);
 
-    const cacheId = stashSubmission(makeStashedContext({ userId: 'U1' }));
+    expect(() =>
+      handlePostback(postbackEvent('action=confirm&id=stale-cache-id', 'U1'))
+    ).not.toThrow();
 
-    handlePostback(postbackEvent(`action=confirm&id=${cacheId}`, 'U1'));
-
-    // POSITIVE (write path reached): a submissions row is written exactly once.
-    // (RED on stubs: the write path calls resolveEmployeeName → NotImplemented,
-    // so no row/append + no success card; GREEN after FILL with the empty-roster
-    // placeholder fallback.)
-    expect(submissionsTab.appendRow).toHaveBeenCalledTimes(1);
-
-    const json = repliedJson();
-    // POSITIVE (terminal ack): the success card is the "บันทึกแล้ว" save-ack —
-    // this is the marker UNIQUE to the confirm success card (the summary card
-    // never renders it), so it is the correct card distinguisher.
-    expect(json).toContain('บันทึกแล้ว');
-    // POSITIVE (running summary, Phase 5 acceptance PLAN line 122): the success
-    // card ALSO shows the running summary line "สัปดาห์นี้ N · เดือนนี้ N · รวม N".
-    // Asserting its presence (not absence) restores the Phase-5 contract this
-    // spec previously contradicted. RED on the CURRENT impl (plain success card
-    // with no summary); GREEN once the write path passes counts+dailyValues to
-    // buildSuccessCard.
-    expect(json).toContain('สัปดาห์นี้');
-    // NEGATIVE: a confirm must never be mis-routed to the help/trigger branch.
-    expect(json).not.toContain('วิธีส่งรูป'); // not the trigger card
+    // The confirm write branch is gone: nothing is written and nothing is replied.
+    expect(submissionsTab.appendRow).not.toHaveBeenCalled();
+    expect(mockedLine.reply).not.toHaveBeenCalled();
   });
 });

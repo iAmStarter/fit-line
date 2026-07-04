@@ -1,6 +1,7 @@
 # Plan: fit-webhook (LINE OA ↔ Fit-OCR consumer)
 <!-- infra: self-managed (Phase 0 below) — clasp / GAS Web App / Script Properties / Sheet -->
 > Approval: **APPROVED** by owner (Theerasak Duangkaew) 2026-07-04 — full scope P0–P7 incl. P3 stretch. (hard rule 13 — PLAN-APPROVAL gate cleared)
+> **v2 / CR-1 (2026-07-04):** owner approved "Auto-save, no confirm" (docs/CHANGES.md CR-1) → **Phase 8** added below; commercial + plan re-approval both granted via the CR gate. P1/P2/P3/P5 stay `done` (frozen); Phase 8 supersedes the confirm-flow behavior.
 
 Scope (owner-approved 2026-07-04): **Core (P0+P1+P2+Integration) + P3 stretch — ทั้งหมด**.
 Autonomy: **AUTO**. Docs language: **th** (ศัพท์เทคนิคคง English). UI hard rule: **ไม่มี emoji ทุก Flex/UI output**.
@@ -169,3 +170,20 @@ Autonomy: **AUTO**. Docs language: **th** (ศัพท์เทคนิคค�
     (fit-webhook = GAS Web App → smoke = `doPost` ต่อ dev channel ตอบ 200 บน invalid-sig payload + real image round-trip; ถ้ามี `/health`-style exec URL → 200)
   - update docs/ENDPOINTS.md with the final deployed base URL (GAS Web App exec URL + LINE dev webhook URL)
 - TDD: **YES** สำหรับ logic (identity resolve, rich-menu routing) — RED-first; advanced chart + rich-menu register = staged manual (owner). Final deploy smoke = manual verify.
+
+## CR-1 change: Sprint 4 (post-v1 change order)
+
+## Phase 8: CR-1 — auto-save (remove confirm step)  [+1.5–2.5d]  [status: done]
+
+- slice: (behavior change) image → verify → gates (rate-limit, sha256 dedup) → OCR → rule pipeline (calorie→backdate→dedupDate) → **PASS → write submissions immediately** (name resolved, imageHash, status=recorded) + register employee + reply **success card** (summary + chart), guarded by messageId+LockService idempotency **on the image path**. **FAIL → reject card** (unchanged). No confirm card, no confirm postback.
+- rationale: CR-1 (owner-approved 2026-07-04) — drop the 2-tap confirm; save on rules-pass. Faster UX; rules remain the gate.
+- architecture: `src/main.ts` `handleImageMessage` — after `evaluateSubmissionRules` ok → move the Phase-2 write (`appendSubmission`+`ensureEmployee`) + Phase-3 `withScriptLock`+`submissionExistsByMessageId` idempotency INLINE here (from `handlePostback`), then `countSubmissions`+`recentDailyValues`→`buildSuccessCard`. Remove `buildConfirmCard` use + the confirm stash (`stashSubmission`/`retrieveSubmission`/`removeSubmission`) + the `action=confirm` postback branch. `handlePostback` keeps dispute/help/summary. DELETE now-dead: `src/line/flex/confirm.ts`, confirm-flow stash usage, and their tests (cacheStore stash tests, confirmCard tests, postback-confirm tests) — or repurpose. Reject/rules/dedup/rate-limit/OCR/identity/rich-menu untouched.
+- acceptance (sharp, testable):
+  - GIVEN image passes all rules (active=200, activityDate=today, not dup) WHEN processed THEN a `submissions` row is appended immediately (status=recorded, name=resolveEmployeeName, imageHash set) AND reply = **success card** (contains "บันทึกแล้ว" + summary "สัปดาห์นี้…") — and there is **no confirm card**, no `action=confirm` needed.
+  - GIVEN webhook redelivery of the SAME messageId WHEN processed concurrently/again THEN exactly **1** `submissions` row (image-path `withScriptLock` + `submissionExistsByMessageId`).
+  - GIVEN rules FAIL (e.g. calorie<150) → reject card (unchanged; fail-counter/dispute unchanged).
+  - edge/negative: a stray `action=confirm&id=…` postback (legacy) → graceful ignore (no throw, doPost 200). Sheet-write throw on the image path → reply "บันทึกไม่สำเร็จ ลองใหม่" (no crash, no partial). LockService timeout → "ระบบไม่ว่าง ลองใหม่".
+- qa focus: write-on-image-path idempotency under redelivery (moved lock) · no confirm card emitted on pass · legacy confirm-postback graceful · success card summary computed after the auto-insert · reject/dispute path unchanged.
+- security: **TRUST BOUNDARY — auto-persist without human review.** Re-threat-model (CHANGES.md CR-1): OCR misread now auto-records (mitigation: rule pipeline gates every save; no manual value edit); redelivery double-write mitigated by the image-path lock (mandatory now); postback `id`-tamper surface reduced. ASVS L2.
+- external: none (mock/real OCR unchanged from P6).
+- TDD: **YES** — RED-first: realign image-path tests (pass→immediate write + success), redelivery idempotency on image path, legacy-confirm-postback graceful; delete dead confirm/stash tests.

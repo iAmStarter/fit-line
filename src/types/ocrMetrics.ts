@@ -98,6 +98,28 @@ export interface OcrMetrics {
 }
 
 /**
+ * Context envelope for a confirmed submission: the OCR reading plus the LINE
+ * lineage (`messageId`, `userId`) and the image hash that the `submissions` row +
+ * Phase 3 dedup require but that a bare `OcrMetrics` lacks. Built at image-time in
+ * `handleImageMessage` and passed straight into `appendSubmission` / the success
+ * card (CR-1 / Phase 8: auto-save on rules-pass — no cross-event stash anymore).
+ */
+export interface StashedContext {
+  /** The OCR reading to persist. */
+  metrics: OcrMetrics;
+  /** LINE message id of the source image event (submissions dedup key). */
+  messageId: string;
+  /** LINE user id of the sender (submissions + employees registration). */
+  userId: string;
+  /**
+   * Canonical sha256 hex of the source image bytes (Phase 3). Computed at
+   * image-time (the cost gate, before OCR) and written into the `submissions`
+   * row for system-wide image dedup.
+   */
+  imageHash: string;
+}
+
+/**
  * Per-user submission tallies shown on the success card summary (Phase 5).
  * All counts are RECORDED-only. `week` = Monday→Sunday of the current week
  * (Asia/Bangkok); `month` = the current `yyyy-MM`; `total` = all recorded rows

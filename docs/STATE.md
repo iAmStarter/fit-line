@@ -1,6 +1,6 @@
 # STATE
 
-phase: 7 (done) — PROJECT COMPLETE (P0–P7). Remaining = owner deploy steps only (docs/RUNBOOK.md).
+phase: 8 (done) — CR-1 auto-save COMPLETE. PROJECT COMPLETE (P0–P7 + CR-1). Flow now: image → rules pass → SAVE immediately → success card (no confirm). Remaining = owner deploy (docs/RUNBOOK.md). Suite 239/239 + 3 live-contract; all tooling clean.
 plan: APPROVED 2026-07-04 (owner approved proposal = plan sign-off; scope = Core P0+P1+P2+Integration + P3 stretch ทั้งหมด)
 tdd: true
 completed: P0(32) P1 P2 P3 P4 done. P4 = rule pipeline evaluateSubmissionRules(m,userId,todayISO) = calorie→backdate(≤1d date-only Asia/Bangkok)→dedupDate(recorded-only), short-circuit first-fail; hasRecordedSubmission. FULL suite 137/137; regression 14/14; tsc/eslint/prettier/build clean; SAST+secrets clean.

@@ -19,12 +19,6 @@ import { getProp, PROP_KEYS } from './config/props';
 import { getMessageContent, reply } from './line/lineClient';
 import { getRecognizer } from './ocr/ocrClient';
 import { evaluateSubmissionRules } from './rules/rulePipeline';
-import {
-  stashSubmission,
-  retrieveSubmission,
-  removeSubmission,
-} from './state/cacheStore';
-import { buildConfirmCard } from './line/flex/confirm';
 import { buildRejectCard, buildBlockNoticeCard } from './line/flex/reject';
 import { buildSuccessCard } from './line/flex/success';
 import { buildTriggerCard } from './line/flex/trigger';
@@ -45,8 +39,6 @@ import { withScriptLock } from './state/lock';
 
 /** User-facing coach line when OCR fails/times out (PLAN Phase 1 line 53). */
 const OCR_ERROR_TEXT = 'อ่านรูปไม่สำเร็จ ลองใหม่';
-/** User-facing line when the confirm stash is gone/expired (PLAN Phase 2). */
-const STASH_MISS_TEXT = 'หมดเวลา ส่งรูปใหม่';
 /** User-facing line when the Sheet write fails (PLAN Phase 2). */
 const SHEET_ERROR_TEXT = 'บันทึกไม่สำเร็จ ลองใหม่';
 /** User-facing line when the per-user rate-limit is exceeded (PLAN Phase 3). */
@@ -61,8 +53,6 @@ const ERROR_COLOR = '#d64545';
 const DISPUTE_ACK_TEXT = 'ส่งเรื่องให้แอดมินตรวจสอบแล้ว';
 /** Postback `action` value for the dispute quick-reply (Phase 5). */
 const DISPUTE_ACTION = 'dispute';
-/** Postback `action` value for the confirm write-path button (Phase 2). */
-const CONFIRM_ACTION = 'confirm';
 /** Postback `action` value for the rich-menu "วิธีส่งรูป" button (Phase 7). */
 const HELP_ACTION = 'help';
 /** Postback `action` value for the rich-menu "สรุปของฉัน" button (Phase 7). */
@@ -290,17 +280,43 @@ export function handleImageMessage(event: LineWebhookEvent): void {
     const result = evaluateSubmissionRules(metrics, userId, todayISO);
 
     if (result.ok) {
-      // Pass → stash the submission context (OCR + LINE lineage + imageHash) for
-      // the confirm postback, reply a confirm card. messageId + userId + imageHash
-      // ride in the stash because the postback event carries none of them (needed
-      // for the submissions row + Phase 3 dedup).
-      const cacheId = stashSubmission({
-        metrics,
-        messageId,
-        userId,
-        imageHash,
-      });
-      reply(replyToken, [buildConfirmCard(metrics, cacheId)]);
+      // CR-1 / Phase 8 (auto-save): rules passed → persist IMMEDIATELY, no user
+      // confirm. Build the submission context (OCR + LINE lineage + imageHash),
+      // then serialise the check-then-write under the script-wide lock so a LINE
+      // webhook redelivery of the SAME messageId cannot create a duplicate row
+      // (idempotency moved onto the image path, OVERVIEW risk #4). A waitLock
+      // timeout throws out of withScriptLock → lock-timeout notice (no double
+      // write); a Sheet-write throw → sheet-error notice. In both cases nothing
+      // partial is left behind. On success, counts/dailyValues are read AFTER the
+      // append so this submission is reflected in the running summary (Phase 5).
+      const ctx = { metrics, messageId, userId, imageHash };
+      try {
+        withScriptLock(() => {
+          if (!submissionExistsByMessageId(messageId)) {
+            appendSubmission(ctx);
+            // Register the sender under their resolved roster name (falls back to
+            // the placeholder when unrostered) — the same name the row records.
+            ensureEmployee(userId, resolveEmployeeName(userId));
+          }
+        });
+        const counts = countSubmissions(userId, todayISO);
+        const daily = recentDailyValues(userId, todayISO);
+        reply(replyToken, [buildSuccessCard(ctx, counts, daily)]);
+      } catch (writeErr) {
+        // Lock timeout → "ระบบไม่ว่าง ลองใหม่" (system-busy, no cameraRoll — an
+        // immediate resend does not help); a Sheet-write failure → "บันทึกไม่สำเร็จ
+        // ลองใหม่". doPost still returns 200.
+        Logger.log(
+          `handleImageMessage auto-save error: ${
+            writeErr instanceof Error ? writeErr.message : writeErr
+          }`
+        );
+        reply(replyToken, [
+          isLockTimeout(writeErr)
+            ? buildBlockNoticeCard(LOCK_TIMEOUT_TEXT)
+            : buildSheetErrorCard(),
+        ]);
+      }
     } else {
       // Fail → reply a reject card. Bump the per-(user, activity) reject-streak
       // counter (disputeGuard, keyed `fc:<userId>:<activityType||unknown>`) and,
@@ -330,31 +346,6 @@ export function handleImageMessage(event: LineWebhookEvent): void {
       Logger.log(`handleImageMessage: error-card reply failed — ${replyErr}`);
     }
   }
-}
-
-/**
- * Extract the stash id from a confirm postback's `data` string.
- * Format (set by the confirm card): `action=confirm&id=<shortId>`.
- * @param data the raw `event.postback.data` string.
- * @returns the `<shortId>`, or `null` when absent/malformed.
- *
- * SCAFFOLD (Phase 2): stub only — body throws NotImplemented.
- */
-function parsePostbackId(data: string | undefined): string | null {
-  if (!data) {
-    return null;
-  }
-  // Parse the compact `action=confirm&id=<id>` payload (query-string form).
-  for (const pair of data.split('&')) {
-    const eq = pair.indexOf('=');
-    if (eq === -1) continue;
-    const key = pair.slice(0, eq);
-    if (key === 'id') {
-      const value = pair.slice(eq + 1);
-      return value.length > 0 ? value : null;
-    }
-  }
-  return null;
 }
 
 /**
@@ -435,44 +426,6 @@ function buildDisputeAckCard(): object {
 }
 
 /**
- * Build the stash-miss card: shown when the confirm stash is gone/expired so the
- * postback cannot be honoured. Error style + `cameraRoll` quick reply so the
- * user can resend (PLAN Phase 2, OVERVIEW risk #7). No emoji.
- *
- * SCAFFOLD (Phase 2): stub only — body throws NotImplemented.
- */
-function buildStashMissCard(): object {
-  return {
-    type: 'flex',
-    altText: STASH_MISS_TEXT,
-    contents: {
-      type: 'bubble',
-      body: {
-        type: 'box',
-        layout: 'vertical',
-        contents: [
-          {
-            type: 'text',
-            text: STASH_MISS_TEXT,
-            color: ERROR_COLOR,
-            weight: 'bold',
-            wrap: true,
-          },
-        ],
-      },
-    },
-    quickReply: {
-      items: [
-        {
-          type: 'action',
-          action: { type: 'cameraRoll', label: 'ส่งรูปใหม่' },
-        },
-      ],
-    },
-  };
-}
-
-/**
  * Build the Sheet-write-error card: shown when the datastore write throws.
  * Error style, no quick reply, no stash deletion (the stash survives for a
  * retry) (PLAN Phase 2). No emoji.
@@ -503,23 +456,17 @@ function buildSheetErrorCard(): object {
 }
 
 /**
- * Phase 2 postback-event handler (confirm write path).
+ * Postback-event handler (CR-1 / Phase 8: no confirm write path).
  *
- * Flow (PLAN Phase 2):
- *   1. parse `action=confirm&id=<id>` from the postback data.
- *   2. `retrieveSubmission(id)` — miss/expired → reply the stash-miss card
- *      ("หมดเวลา ส่งรูปใหม่" + cameraRoll), write nothing.
- *   3. else write: `appendSubmission` (status=recorded) + `ensureEmployee`
- *      (register once), then `removeSubmission(id)` to consume the stash
- *      (double-confirm guard), then reply the success card.
- *   4. on Sheet-write throw → reply the Sheet-error card
- *      ("บันทึกไม่สำเร็จ ลองใหม่"); do NOT delete the stash (allow retry).
+ * Routes the three live postback actions and gracefully ignores everything else:
+ *   - `action=dispute&mid=<messageId>` → log ONE dispute (idempotent) + ack (P5).
+ *   - `action=help`                    → how-to trigger card (P7 rich-menu).
+ *   - `action=summary`                 → the user's on-demand summary card (P7).
+ *   - anything else, incl. a LEGACY `action=confirm&id=…` from an old confirm
+ *     card still in a chat → graceful IGNORE (no reply, no write, no throw).
  *
- * Never throws out (caller keeps doPost at 200). All recorded values come from
- * the server-side stash, never from the postback payload (STRIDE: no elevation).
- *
- * SCAFFOLD (Phase 2): body throws NotImplemented (GREEN fills the flow). The
- * calls below are referenced so the interface surface + imports are pinned.
+ * The confirm write path is GONE: passing images now auto-save on the image path
+ * (`handleImageMessage`). Never throws out (caller keeps doPost at 200).
  * @param event a single `postback` webhook event.
  */
 export function handlePostback(event: LineWebhookEvent): void {
@@ -590,93 +537,12 @@ export function handlePostback(event: LineWebhookEvent): void {
     }
     return;
   }
-  // A postback carrying an `action` we don't route — and NOT the confirm write
-  // path (`action=confirm&id=…`, handled below) — is an unknown rich-menu/postback
-  // tap. Ignore gracefully (no throw, no stash-miss card) so doPost stays 200
-  // (PLAN Phase 7 acceptance: unknown postback → ignore).
-  if (action !== null && action !== CONFIRM_ACTION) {
-    Logger.log(`handlePostback: ignoring unknown action "${action}".`);
-    return;
-  }
-
-  const id = parsePostbackId(event.postback?.data);
-  const ctx = id !== null ? retrieveSubmission(id) : null;
-
-  // Stash miss/expired (or malformed id): nothing to record → "หมดเวลา" +
-  // cameraRoll. No Sheet write (STRIDE: forged id → cache-miss, not a write).
-  if (id === null || ctx === null) {
-    try {
-      reply(replyToken, [buildStashMissCard()]);
-    } catch (replyErr) {
-      Logger.log(`handlePostback: stash-miss reply failed — ${replyErr}`);
-    }
-    return;
-  }
-
-  try {
-    // Serialise the check-then-write under the script-wide lock so a LINE
-    // webhook redelivery of the same messageId cannot create a duplicate row
-    // (Phase 3 idempotency, OVERVIEW risk #4). A waitLock timeout throws out of
-    // withScriptLock and is caught below → lock-timeout notice (no double-write).
-    withScriptLock(() => {
-      if (submissionExistsByMessageId(ctx.messageId)) {
-        // Redelivery / already recorded → idempotent skip: do NOT write again,
-        // consume the stash, and echo the same terminal success card as the write
-        // branch. (Phase 7: the running week/month/total tally lives behind the
-        // "สรุปของฉัน" rich-menu button, not on this write-path card.)
-        Logger.log(
-          `handlePostback: messageId ${ctx.messageId} already recorded; idempotent skip.`
-        );
-        removeSubmission(id);
-        const todayISO = Utilities.formatDate(
-          new Date(),
-          'Asia/Bangkok',
-          'yyyy-MM-dd'
-        );
-        const counts = countSubmissions(ctx.userId, todayISO);
-        const daily = recentDailyValues(ctx.userId, todayISO);
-        reply(replyToken, [buildSuccessCard(ctx, counts, daily)]);
-        return;
-      }
-      // New submission → write it + register the sender (once). All values are
-      // server-side (from the stash + now), never from the postback payload.
-      appendSubmission(ctx);
-      // Phase 7: register the sender under their resolved roster name (falls back
-      // to the placeholder when unrostered) — the same name the submissions row
-      // records, so the two stores agree.
-      ensureEmployee(ctx.userId, resolveEmployeeName(ctx.userId));
-      // Consume the stash ONLY after a successful write so a repeated confirm
-      // finds nothing → no double-write (idempotent-ish, PLAN Phase 2).
-      removeSubmission(id);
-      // Terminal success card ("บันทึกแล้ว" + recorded calorie + running summary
-      // week/month/total + 7-day chart). counts/dailyValues are read AFTER the
-      // append so this submission is reflected in the tally (Phase 5).
-      const todayISO = Utilities.formatDate(
-        new Date(),
-        'Asia/Bangkok',
-        'yyyy-MM-dd'
-      );
-      const counts = countSubmissions(ctx.userId, todayISO);
-      const daily = recentDailyValues(ctx.userId, todayISO);
-      reply(replyToken, [buildSuccessCard(ctx, counts, daily)]);
-    });
-  } catch (err) {
-    // Lock timeout OR Sheet write failure. A lock timeout means we could not
-    // safely serialise the write → reply "ระบบไม่ว่าง ลองใหม่" (no double-write);
-    // a write failure → "บันทึกไม่สำเร็จ ลองใหม่". In both cases keep the stash so
-    // the user can retry.
-    Logger.log(
-      `handlePostback error: ${err instanceof Error ? err.message : err}`
-    );
-    const notice = isLockTimeout(err)
-      ? buildBlockNoticeCard(LOCK_TIMEOUT_TEXT)
-      : buildSheetErrorCard();
-    try {
-      reply(replyToken, [notice]);
-    } catch (replyErr) {
-      Logger.log(`handlePostback: error-card reply failed — ${replyErr}`);
-    }
-  }
+  // Any other postback — an unknown rich-menu tap OR a LEGACY `action=confirm`
+  // from an old confirm card still sitting in a user's chat — is ignored
+  // GRACEFULLY: no reply, no write, no throw (CR-1 / Phase 8 removed the confirm
+  // write path; passing images now auto-save on the image path). doPost still
+  // returns 200 (PLAN Phase 8 acceptance edge/negative).
+  Logger.log(`handlePostback: ignoring unrouted action "${action ?? ''}".`);
 }
 
 /**

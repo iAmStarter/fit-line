@@ -1,31 +1,32 @@
 /**
  * test/phase-1/router.spec.ts — phase-local: image-event routing + handler.
  *
- * RED-first (Phase 1, TDD). Asserts BEHAVIOR from PLAN Phase 1 acceptance
- * (image read path) via routeWebhook(rawBody) / handleImageMessage(event):
- *   - image event + pipeline PASSES -> reply called with a CONFIRM card AND the
- *     OCR result is stashed in CacheService (a put occurred).
- *   - image event + pipeline REJECTS (a calorie-reject reason) -> reply called
- *     with a REJECT card AND NO stash occurred. (Phase 4: the confirm path now
- *     runs the rule PIPELINE, not calorieRule directly; this test verifies main
- *     FORWARDS a pipeline reject → reject card. The calorie LOGIC itself is
- *     covered by the calorie/pipeline unit suites, not here.)
- *   - OCR throws -> reply called with a graceful error card ("อ่านรูปไม่สำเร็จ");
- *     the handler does NOT throw out (doPost stays 200).
+ * REALIGNED for CR-1 / Phase 8 (auto-save). The confirm step is GONE: an image
+ * that PASSES the rules is written to the sheet IMMEDIATELY and answered with the
+ * SUCCESS card — no confirm card, no CacheService stash. Asserts BEHAVIOR from
+ * PLAN Phase 8 acceptance (image path) via routeWebhook(rawBody) /
+ * handleImageMessage(event):
+ *   - image event + pipeline PASSES -> a `submissions` row is appended ONCE AND
+ *     reply is a SUCCESS card ("บันทึกแล้ว"); NO confirm postback marker; NO
+ *     CacheService stash (the confirm-flow cache is gone).
+ *   - image event + pipeline REJECTS (a calorie-reject reason) -> reply is a
+ *     REJECT card AND nothing is written. (main FORWARDS a pipeline reject → reject
+ *     card; the calorie LOGIC itself is covered by the calorie/pipeline suites.)
+ *   - OCR throws -> reply is a graceful error card ("อ่านรูปไม่สำเร็จ"); the handler
+ *     does NOT throw out (doPost stays 200); nothing written.
  *   - non-image event (text/sticker) -> graceful (no throw).
  *
- * MOCK suite: the external boundaries are (a) LINE getContent/reply and (b) the
- * OCR recognizer. We mock ONLY those seams:
- *   - `jest.mock('../../src/line/lineClient')` doubles getMessageContent (returns
- *     a fake blob) + reply (spy).
- *   - `jest.spyOn(ocrMock, 'recognize')` drives the OCR return / throw.
- *   - CacheService is a stateful in-memory double (real stash boundary).
- * Phase-3 gates (rateLimit + imageDedup) and the Phase-4 rule pipeline are mocked
- * at their module seams so THIS suite exercises only main's read-path routing /
- * card choice; their own behaviour is asserted in their own unit suites. The
- * confirm-vs-reject distinction is asserted on the payload passed to reply
- * (compact postback `action=confirm` marker vs the reject cameraRoll / error
- * color) — behaviour, not internal wiring. We never read impl bodies.
+ * MOCK suite: external boundaries mocked are (a) LINE getContent/reply and (b) the
+ * OCR recognizer. The write path (appendSubmission / ensureEmployee /
+ * resolveEmployeeName / countSubmissions / recentDailyValues) runs REAL over
+ * stateful GAS doubles (SpreadsheetApp / PropertiesService) — the real datastore
+ * boundary. The script-lock wrapper is neutralised to a synchronous pass-through
+ * so the write body runs inline. Phase-3 gates (rateLimit + imageDedup) and the
+ * Phase-4 rule pipeline are mocked at their seams so THIS suite exercises only
+ * main's image-path routing / auto-save / card choice; their own behaviour lives
+ * in their own unit suites. mock/real flag: GAS services have no cheap Node
+ * analogue → these stateful doubles ARE the real boundary. We never read impl
+ * bodies — only public signatures.
  */
 
 import { routeWebhook, handleImageMessage } from '../../src/main';
@@ -39,36 +40,30 @@ import * as disputeGuard from '../../src/rules/disputeGuard';
 import { CALORIE_THRESHOLD_KCAL } from '../../src/rules/calorieRule';
 import { makeOcrMetrics } from '../support/ocrFixture';
 
-// Mock ONLY the external boundaries (network + OCR seam). Business logic
-// stays real. Auto-mocking ocrMock makes recognize a spy so a text event's
-// "OCR was not called" precondition holds; the OCR-driving tests below
-// still re-configure it via jest.spyOn(ocrMock, 'recognize').
+// Mock ONLY the external boundaries (network + OCR seam). Business logic stays
+// real. Auto-mocking ocrMock makes recognize a spy so a text event's "OCR was not
+// called" precondition holds; the OCR-driving tests below re-configure it.
 jest.mock('../../src/line/lineClient');
 jest.mock('../../src/ocr/ocrMock');
-// Phase 3 introduced pre-OCR gate collaborators that handleImageMessage now
-// routes through (rate-limit + image dedup). These Phase-1 tests are NOT testing
-// those gates — mock them so the pass-path preconditions hold regardless of gate
-// impl (which is filled in Phase 3): rate-limit ALLOWS, image is NOT a duplicate,
-// sha256Hex returns a stable dummy hex. Every original Phase-1 assertion is kept.
+// Phase 3 pre-OCR gate collaborators — mock so the pass-path preconditions hold
+// (rate-limit ALLOWS, image is NOT a duplicate, sha256Hex returns a stable hex).
+// Their own gate behaviour is asserted in test/phase-3/imageGate.spec.ts.
 jest.mock('../../src/rules/rateLimit');
 jest.mock('../../src/rules/imageDedup');
-// Phase 4 wired the post-OCR rule PIPELINE (calorie → backdate → dedup) into the
-// confirm path. These Phase-1 tests are NOT testing rule logic — mock the pipeline
-// so the pass-path reaches stash+confirm ({ok:true}) and the reject-path forwards
-// a first-fail reason to the reject card. The pipeline's own ordering/short-circuit
-// is covered by test/phase-4/rulePipeline.spec.ts.
+// Phase 4 rule PIPELINE — mock so the pass-path reaches the auto-save ({ok:true})
+// and the reject-path forwards a first-fail reason. Ordering is covered in phase-4.
 jest.mock('../../src/rules/rulePipeline');
-// Phase 5 wired a repeated-reject dispute counter (disputeGuard) into the reject
-// path — `bumpFailCount` persists a `fc:<user>:<activity>` counter via
-// CacheService.put and `shouldOfferDispute` decides the auto-offer. These Phase-1
-// tests are NOT testing that counter; its own behaviour is asserted in the
-// disputeGuard / imageRejectDispute suites. Mock the seam so the counter is a
-// no-op here: `bumpFailCount` does NOT touch CacheService (preserving the frozen
-// "a reject writes NOTHING to cache" contract — putSpy not called, cacheStore
-// empty) and returns a below-threshold count so `shouldOfferDispute` is false and
-// the reject card keeps its Phase-1 shape (cameraRoll only, no dispute affordance).
-// Every original Phase-1 assertion is kept unchanged.
+// Phase 5 repeated-reject dispute counter — mock the seam to a no-op below-threshold
+// so the reject card keeps its Phase-1 shape (cameraRoll only, no dispute affordance).
 jest.mock('../../src/rules/disputeGuard');
+// CR-1 / Phase 8: the auto-save write path is guarded by the script-lock wrapper
+// (moved to the IMAGE path). Neutralise it to a synchronous pass-through so the
+// write body runs inline; the lock/idempotency behaviour itself is asserted in
+// test/phase-8/imageWriteIdempotency.spec.ts.
+jest.mock('../../src/state/lock', () => ({
+  LOCK_WAIT_MS: 10000,
+  withScriptLock: <T>(fn: () => T): T => fn(),
+}));
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const g = globalThis as any;
@@ -90,7 +85,77 @@ function fakeBlob(): any {
   };
 }
 
-/** Install a stateful in-memory CacheService so a real stash can be observed. */
+/** The canonical 14-col submissions / 3-col employees headers (OVERVIEW §5). */
+const SUBMISSIONS_HEADER = [
+  'messageId',
+  'userId',
+  'name',
+  'activityType',
+  'activityDateISO',
+  'submittedAtISO',
+  'activeCaloriesKcal',
+  'totalCaloriesKcal',
+  'distanceKm',
+  'source',
+  'confidence',
+  'status',
+  'rejectReason',
+  'imageHash',
+];
+const EMPLOYEES_HEADER = ['userId', 'name', 'registeredAtISO'];
+const ROSTER_HEADER = ['userId', 'name'];
+
+interface FakeTab {
+  rows: unknown[][];
+  appendRow: jest.Mock;
+}
+function makeTab(header: unknown[], dataRows: unknown[][] = []): FakeTab {
+  const rows: unknown[][] = [header, ...dataRows.map((r) => [...r])];
+  const appendRow = jest.fn((r: unknown[]): void => {
+    rows.push([...r]);
+  });
+  return { rows, appendRow };
+}
+function asSheet(tab: FakeTab): any {
+  return {
+    appendRow: tab.appendRow,
+    getDataRange: jest.fn(() => ({
+      getValues: jest.fn((): unknown[][] => tab.rows),
+    })),
+    getLastRow: jest.fn((): number => tab.rows.length),
+  };
+}
+
+let submissionsTab: FakeTab;
+
+/** Install the SpreadsheetApp/Properties/Lock doubles for the auto-save path. */
+function installEnv(): void {
+  submissionsTab = makeTab(SUBMISSIONS_HEADER);
+  const employeesTab = makeTab(EMPLOYEES_HEADER);
+  const rosterTab = makeTab(ROSTER_HEADER); // empty → placeholder name fallback
+  g.SpreadsheetApp.openById.mockReturnValue({
+    getSheetByName: jest.fn((name: string): any => {
+      if (name === 'submissions') return asSheet(submissionsTab);
+      if (name === 'employees') return asSheet(employeesTab);
+      if (name === 'roster') return asSheet(rosterTab);
+      return null;
+    }),
+  });
+  g.PropertiesService.getScriptProperties.mockReturnValue({
+    getProperty: jest.fn((key: string): string | null =>
+      key === 'SHEET_ID' ? 'sheet-abc' : null
+    ),
+    setProperty: jest.fn(),
+    getProperties: jest.fn((): Record<string, string> => ({})),
+  });
+  g.LockService.getScriptLock.mockReturnValue({
+    waitLock: jest.fn(),
+    tryLock: jest.fn((): boolean => true),
+    releaseLock: jest.fn(),
+  });
+}
+
+/** Install a stateful in-memory CacheService (used to PROVE no stash occurs). */
 let cacheStore: Map<string, string>;
 let putSpy: jest.Mock;
 function installStatefulCache(): void {
@@ -133,6 +198,7 @@ const IMAGE_EVENT: LineWebhookEvent = {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  installEnv();
   installStatefulCache();
   mockedLine.getMessageContent.mockReturnValue(fakeBlob());
   mockedLine.reply.mockImplementation(() => undefined);
@@ -140,13 +206,11 @@ beforeEach(() => {
   mockedRateLimit.rateLimitAllows.mockReturnValue(true);
   mockedImageDedup.sha256Hex.mockReturnValue('deadbeef'.repeat(8));
   mockedImageDedup.isDuplicateImage.mockReturnValue(false);
-  // Pass-path pipeline default: all business rules pass → reach stash+confirm.
+  // Pass-path pipeline default: all business rules pass → reach the auto-save.
   mockedPipeline.evaluateSubmissionRules.mockReturnValue({ ok: true });
-  // Dispute-counter defaults: `bumpFailCount` is a no-op that does NOT write the
-  // `fc:` cache key (keeping the frozen "reject writes nothing to cache" contract)
-  // and returns a below-threshold count so `shouldOfferDispute` stays false → the
-  // reject card keeps its Phase-1 shape (no dispute affordance). Isolating this
-  // Phase-5 side-effect does not weaken any Phase-1 assertion below.
+  // Dispute-counter defaults: no-op below-threshold so the reject card keeps its
+  // Phase-1 shape (no dispute affordance). Isolating this Phase-5 side-effect does
+  // not weaken any assertion below.
   mockedDisputeGuard.bumpFailCount.mockReturnValue(1);
   mockedDisputeGuard.shouldOfferDispute.mockReturnValue(false);
 });
@@ -155,8 +219,8 @@ afterEach(() => {
   jest.restoreAllMocks();
 });
 
-describe('handleImageMessage — pass path (confirm + stash)', () => {
-  it('OCR active=200 -> reply with a CONFIRM card and OCR stashed', () => {
+describe('handleImageMessage — pass path (auto-save + success, NO confirm/stash)', () => {
+  it('OCR active=200 -> writes a submissions row once and replies a SUCCESS card', () => {
     jest
       .spyOn(ocrMock, 'recognize')
       .mockReturnValue(makeOcrMetrics({ activeCaloriesKcal: 200 }));
@@ -165,20 +229,23 @@ describe('handleImageMessage — pass path (confirm + stash)', () => {
 
     // fetched the image content for the event's message id
     expect(mockedLine.getMessageContent).toHaveBeenCalledWith('msg-100');
-    // replied with a confirm card (compact confirm postback marker present)
+    // auto-save: a submissions row was appended exactly once
+    expect(submissionsTab.appendRow).toHaveBeenCalledTimes(1);
+    // reply is the SUCCESS card (save ack), NOT a confirm card
     const payload = lastReplyPayload();
-    expect(payload).toContain('action=confirm');
-    // OCR result was stashed (a cache put occurred)
-    expect(putSpy).toHaveBeenCalled();
-    expect(cacheStore.size).toBeGreaterThan(0);
+    expect(payload).toContain('บันทึกแล้ว');
+    expect(payload).not.toContain('action=confirm');
+    // no confirm-flow stash: the CacheService is never written for a submission
+    expect(putSpy).not.toHaveBeenCalled();
+    expect(cacheStore.size).toBe(0);
   });
 });
 
-describe('handleImageMessage — reject path (no stash)', () => {
-  it('pipeline rejects (calorie reason) -> reply with a REJECT card and NO stash', () => {
-    // OCR succeeds; the PIPELINE returns a first-fail reject (calorie). This test
-    // verifies main FORWARDS the pipeline reject → reject card (the calorie logic
-    // itself lives in the calorie/pipeline unit suites).
+describe('handleImageMessage — reject path (no write, no stash)', () => {
+  it('pipeline rejects (calorie reason) -> reply with a REJECT card and NO write', () => {
+    // OCR succeeds; the PIPELINE returns a first-fail reject (calorie). main
+    // FORWARDS the pipeline reject → reject card (the calorie logic lives in the
+    // calorie/pipeline unit suites).
     jest
       .spyOn(ocrMock, 'recognize')
       .mockReturnValue(
@@ -192,17 +259,17 @@ describe('handleImageMessage — reject path (no stash)', () => {
     handleImageMessage(IMAGE_EVENT);
 
     const payload = lastReplyPayload();
-    // reject card: NOT a confirm, carries the reject error color / cameraRoll
+    // reject card: NOT a confirm, NOT a save ack, carries the reject error color
     expect(payload).not.toContain('action=confirm');
+    expect(payload).not.toContain('บันทึกแล้ว');
     expect(payload.toLowerCase()).toContain('#d64545');
-    // no stash on the reject path
-    expect(putSpy).not.toHaveBeenCalled();
-    expect(cacheStore.size).toBe(0);
+    // nothing written on the reject path
+    expect(submissionsTab.appendRow).not.toHaveBeenCalled();
   });
 });
 
 describe('handleImageMessage — OCR error (graceful)', () => {
-  it('OCR throws -> reply with an error card, no throw out, no stash', () => {
+  it('OCR throws -> reply with an error card, no throw out, no write', () => {
     jest.spyOn(ocrMock, 'recognize').mockImplementation(() => {
       throw new Error('OCR timeout');
     });
@@ -211,12 +278,12 @@ describe('handleImageMessage — OCR error (graceful)', () => {
 
     const payload = lastReplyPayload();
     expect(payload).toContain('อ่านรูปไม่สำเร็จ');
-    expect(putSpy).not.toHaveBeenCalled();
+    expect(submissionsTab.appendRow).not.toHaveBeenCalled();
   });
 });
 
-describe('routeWebhook — image dispatch', () => {
-  it('routes an image message to the image handler (confirm reply)', () => {
+describe('routeWebhook — image dispatch (auto-save)', () => {
+  it('routes an image message to the image handler (writes + success reply)', () => {
     jest
       .spyOn(ocrMock, 'recognize')
       .mockReturnValue(makeOcrMetrics({ activeCaloriesKcal: 200 }));
@@ -224,7 +291,10 @@ describe('routeWebhook — image dispatch', () => {
     routeWebhook(bodyWith(IMAGE_EVENT));
 
     expect(mockedLine.getMessageContent).toHaveBeenCalledWith('msg-100');
-    expect(lastReplyPayload()).toContain('action=confirm');
+    expect(submissionsTab.appendRow).toHaveBeenCalledTimes(1);
+    const payload = lastReplyPayload();
+    expect(payload).toContain('บันทึกแล้ว');
+    expect(payload).not.toContain('action=confirm');
   });
 });
 
