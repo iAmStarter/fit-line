@@ -18,7 +18,7 @@ Autonomy: **AUTO**. Docs language: **th** (ศัพท์เทคนิคค�
 
 ---
 
-## Phase 0: infra setup  [3 pts]  [status: pending]
+## Phase 0: infra setup  [3 pts]  [status: done]
 
 - slice: repo ที่ build+test+deploy ได้จริง — `clasp push` ขึ้น GAS Web App, `doPost` skeleton ตอบ 200, signature-verify scaffold พร้อม, Sheet 2 tab สร้าง, Script Properties ตั้งครบ, dev webhook wired.
 - rationale: ไม่มี toolchain + deploy path + secrets + datastore skeleton → ทุก phase ถัดไปเขียนไม่ได้. Infra self-managed (clasp/GAS) → Phase 0 นำ.

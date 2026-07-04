@@ -10,6 +10,12 @@
 | 2026-07-03 | design-gas-secrets-management | Use PropertiesService (Script Properties) for LINE/OCR tokens; do NOT hardcode or commit `.clasprc.json`; no Secret Manager needed for v1. Rotation quarterly. | `/Users/istd/fit-webhook/docs/research/design-gas-secrets-management.md` |
 | 2026-07-03 | design-image-transport | Multipart/form-data preferred (25–30% smaller, simpler in GAS); base64-in-JSON fallback. Both under 50MB UrlFetchApp limit. Recommend multipart. | `/Users/istd/fit-webhook/docs/research/design-image-transport.md` |
 
+## IMPL Phase Research (fit-webhook IMPLEMENTATION)
+
+| Date | File | Finding | Path |
+|------|------|---------|------|
+| 2026-07-04 | impl-phase-0-toolchain | Concrete Phase 0 scaffolding specs: Rollup v4 IIFE → single .js; TypeScript 5.x target=es5; Jest + DI mocks (test/setup.ts harness provided); Utilities.computeHmacSha256Signature → base64Encode path exact; PropertiesService.getProperty fail-fast pattern; appsscript.json manifest (V8, ANYONE_ANONYMOUS, 3 required scopes); .clasp.json/.claspignore/.gitignore rules; ContentService HTTP 200 response skeleton. **All concrete, zero blockers.** | `/Users/istd/fit-webhook/docs/research/impl-phase-0-toolchain.md` |
+
 ## Key Constraints & Risks Identified
 
 ### CRITICAL: Webhook Architecture Mismatch

@@ -1,0 +1,6 @@
+# Only dist/main.js + appsscript.json should upload to GAS.
+# `.claspignore` globs are relative to rootDir; ** patterns exclude everything
+# except the two files clasp needs.
+**/**
+!main.js
+!appsscript.json

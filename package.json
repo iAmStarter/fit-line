@@ -1,0 +1,36 @@
+{
+  "name": "fit-webhook",
+  "version": "0.1.0",
+  "description": "LINE OA webhook (Google Apps Script) consuming Fit-OCR API",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "rollup -c && cp appsscript.json dist/appsscript.json",
+    "watch": "rollup -c -w",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint \"src/**/*.ts\"",
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\"",
+    "push": "npm run build && clasp push",
+    "logs": "clasp logs"
+  },
+  "devDependencies": {
+    "@google/clasp": "^2.4.2",
+    "@rollup/plugin-typescript": "^11.1.6",
+    "@types/google-apps-script": "^1.0.83",
+    "@types/jest": "^29.5.12",
+    "@types/node": "^18.19.0",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "eslint": "^8.57.0",
+    "jest": "^29.7.0",
+    "prettier": "^3.3.3",
+    "rollup": "^4.21.0",
+    "ts-jest": "^29.2.5",
+    "tslib": "^2.7.0",
+    "typescript": "^5.5.4"
+  }
+}
