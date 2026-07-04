@@ -19,3 +19,6 @@ coverage/
 # env
 .env
 .env.local
+
+# mcp scratch (playwright snapshots, etc.)
+.playwright-mcp/

@@ -1,5 +1,7 @@
 # Implementation Research: Phase 0 Toolchain & Concrete Scaffolding
 
+> [SUPERSEDED — see shipped artifacts in src/ + test/; STATE.md carries current surfaces]
+
 **Date:** 2026-07-04  
 **Phase:** 0 (Infra Setup)  
 **Purpose:** Concrete, current specifications required to scaffold the fit-webhook Phase 0 toolchain.  

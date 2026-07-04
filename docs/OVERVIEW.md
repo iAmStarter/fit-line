@@ -1,5 +1,7 @@
 # OVERVIEW — fit-webhook (LINE OA ↔ Fit-OCR consumer)
 
+**Status: COMPLETE** (P0–P7 shipped; 253/253 jest + 3 live-contract tests green; deployed)
+
 > โปรเจกต์นี้คือ **ฝั่ง consumer** — LINE Official Account webhook bot (Google Apps Script)
 > ที่รับรูป screenshot การออกกำลังกายจากผู้ใช้ LINE → เรียก Fit-OCR API (โปรเจกต์แยก) →
 > ตรวจกติกาธุรกิจ → บันทึก Google Sheet → ตอบกลับ Flex. **เราไม่ได้สร้าง OCR API**.
@@ -110,8 +112,8 @@ test/                  # Jest specs (mocked globals)
 ## 7. External services & confirmed limits (จาก design research)
 
 - **LINE Messaging API:** webhook อยากได้ `200` ใน ~2 วิ (เกิน → error-stat + อาจ redelivery) · **reply token ฟรีไม่จำกัด**, TTL ~1 นาที (>> OCR latency) · **push ฟรี 200/เดือน** (fallback เท่านั้น) · getContent ดาวน์โหลดทันที · verify signature ทุก request.
-- **Google Apps Script:** UrlFetchApp `fetchTimeoutSeconds:10` ✅ ตั้งได้ · payload limit **50 MB** (รูป ~1.5 MB base64 → ~2 MB สบาย) · doPost exec limit · SpreadsheetApp มี daily quota + simultaneous-exec limit · LockService สำหรับ dedup.
-- **Fit-OCR API (โปรเจกต์แยก):** `POST /v1/ocr`, Bearer, base64-JSON หรือ multipart, คืน 25-key JSON คงรูป. **URL + token ส่งให้ภายหลัง** (Phase 2/3 ฝั่งเขา). SLA p95 2–3 วิ. `GET /health` ไม่ต้อง auth.
+- **Google Apps Script:** UrlFetchApp `fetchTimeoutSeconds:30` (was 10; raised to cover upstream Fit-OCR 25s timeout) ✅ ตั้งได้ · payload limit **50 MB** (รูป ~1.5 MB base64 → ~2 MB สบาย) · doPost exec limit · SpreadsheetApp มี daily quota + simultaneous-exec limit · LockService สำหรับ dedup.
+- **Fit-OCR API (โปรเจกต์แยก):** base `https://fit-ocr.istartsoft.dev`, Bearer auth (token format `iss_live_…`, minted at fit-ocr.web.app). `POST /v1/ocr` (multipart field `image`) → 25-key `OcrResult` JSON. `GET /health` (no auth) → `{status:"ok"}`. Errors: 400/401/413/422/502/503. SLA p95 ~25s. ✅ Real contract captured + tested (P6).
 
 **Image transport:** เลือก **multipart/form-data** (เล็กกว่า base64 ~25–30%, Blob auto-detect ใน GAS).
 
@@ -121,15 +123,16 @@ test/                  # Jest specs (mocked globals)
 
 ## 8. Risks / open questions
 
-1. **OCR URL+token ยังไม่มี** → build บน **mock** ของ 25-key contract; true E2E ติดจนกว่าจะ handover. (ไม่ block การเริ่ม)
-2. **`activityDateISO` = null** → กติกา backdate validate ไม่ได้ → ต้องตัดสิน fallback (แนวโน้ม: reject + ขอรูปที่เห็นวันที่ชัด). **open — ตัดสินตอนถึง slice นั้น**
-3. **Scale 1000+ (full rollout):** คอขวด = GAS concurrency + Sheet writes (ไม่ใช่ LINE — reply token ฟรี). → ตั้ง **migration checkpoint** (Cloud Run/Node + DB จริง เช่น Firestore/Supabase) หลัง trial. Trial-first จึงยังใช้ GAS+Sheet ได้.
-4. **LINE webhook redelivery** → ต้องมั่นใจ dedup (`messageId`+LockService) idempotent.
-5. **Employee identity จริง** — v1 placeholder-name; mapping จริง (HR source?) เป็นงานภายหลัง.
-6. **Reply token / getContent TTL** เป๊ะไม่ publish → practice: ใช้/ดาวน์โหลดทันที (conservative). ทั้ง image-event และ postback-event ตอบด้วย reply-token (ฟรี).
-7. **CacheService stash หมดอายุ** ก่อนกดยืนยัน (เช่นทิ้งไว้ >10 นาที) → postback หา stash ไม่เจอ → ตอบ 'หมดเวลา ส่งรูปใหม่'. ต้อง handle gracefully.
-8. **แจ้งแอดมิน (dispute)** = manual review flow — v1 แค่ log dispute (ชีต/แจ้ง admin), ยังไม่มี auto-resolve. นิยาม channel แจ้ง admin ตอนถึง slice นั้น.
-9. **Chart** — ใช้ **native Flex boxes** (P2) ไม่มี external/privacy. เกินกว่านั้น (line/advanced chart) = stretch, ค่อยชั่ง QuickChart/self-host.
+1. ✅ **OCR URL+token RESOLVED** — real contract captured (P6). Base `https://fit-ocr.istartsoft.dev`, Bearer `iss_live_…` (owner-minted), `POST /v1/ocr` multipart, 25-key response. Live contract test GREEN.
+2. **`activityDateISO` = null** → resolved (P4): reject + "ต้องเห็นวันที่ในรูป". Implemented.
+3. ✅ **Employee identity RESOLVED** — roster tab (`employees`) + auto-register on first message (P3). Manual edit by admin for real HR mapping.
+4. **Scale 1000+ (full rollout):** คอขวด = GAS concurrency + Sheet writes (ไม่ใช่ LINE — reply token ฟรี). → ตั้ง **migration checkpoint** (Cloud Run/Node + DB จริง เช่น Firestore/Supabase) หลัง trial. Trial-first จึงยังใช้ GAS+Sheet ได้.
+5. **LINE webhook redelivery** → ✅ guaranteed idempotent via `messageId`+LockService (P3).
+6. **Reply token / getContent TTL** — ✅ conservative: ใช้/ดาวน์โหลดทันที. Both image + postback reply via token (free).
+7. **CacheService stash expiry** — ✅ handled (P2): >10 min → postback stash miss → graceful 'expired, resend'.
+8. **แจ้งแอดมิน (dispute)** — ✅ implemented (P5): fail-counter ≥3 offers "แจ้งแอดมิน" quick-reply → `disputes` tab. Manual review.
+9. ✅ **Chart** — ✅ implemented (P5) via **native Flex boxes** (no external/privacy). Weekly + monthly summary + bar chart (Flex height/color).
+10. **pHash (perceptual duplicate detection)** — flagged as P3 "imperfect future work"; not implemented (imageHash + backdate rules sufficient for MVP).
 
 ---
 
