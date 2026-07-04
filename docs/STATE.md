@@ -17,7 +17,8 @@ blocker: none — เดินหน้า planner → PLAN.md ได้
 - Estimate: Core ฿83k–129k (@฿8k/day placeholder, +15%) · 30/40/30
 
 ## NEXT (fresh session)
-1. รับ proposal approval → stamp PROPOSAL.md + STATE `plan: approved <date>` + HISTORY line
-2. รัน planner → PLAN.md ; สร้าง ISSUES.md / HISTORY.md / ENDPOINTS.md (ยังไม่ได้สร้าง)
-3. PLAN-APPROVAL gate → เริ่ม /phase (Phase 0 bootstrap: clasp+TS+Jest, Script Properties, deploy skeleton)
-- OCR URL+token ยังไม่มี → build บน mock; true E2E ติดจน handover
+- PLAN.md **APPROVED** (8 phases: P0 infra + P1–P7 slices, 3 sprints). gate cleared.
+1. เริ่ม **/phase Phase 0** (infra): clasp+TS+Jest+Rollup · Script Properties · doPost skeleton 200 · signature-verify (RED-first) · Sheet 2 tab · wire dev webhook. TDD=YES(sig/props)+manual deploy.
+2. ต่อ P1→P2→P3→P4→P5→P6(swap real OCR)→P7(final+deploy) sequential.
+- OCR URL+token ยังไม่มี → P1–P5 build บน mock; Phase 6 = swap point; true E2E ติดจน handover
+- owner-only steps: clasp login · LINE console webhook wiring · real-device E2E (Phase 6)
