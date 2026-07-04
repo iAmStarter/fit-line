@@ -1,36 +1,30 @@
 import typescript from '@rollup/plugin-typescript';
 
-// GAS has NO module system. The deployed file must expose entry points
-// (doPost / doGet) as TOP-LEVEL globals, callable by the GAS runtime as the
-// bare identifier `doPost` (not `App.doPost`).
+// GAS has NO module system. We bundle into an IIFE namespace object `App`
+// (holding the named exports), then emit TOP-LEVEL wrapper `function`
+// declarations in the `footer`.
 //
-// Strategy (research §1.3 GAS-globals gotcha):
-//   - Build an IIFE with a namespace object `App` holding the named exports.
-//   - In an `outro`, copy each entry point off `App` onto the GAS global
-//     object. `_gasGlobal` resolves to `this` at IIFE scope, which under GAS
-//     is the global scope (globalThis fallback for other runtimes).
-//
-// Only entry points that are actually exported are hoisted, so no
-// ReferenceError on absent handlers.
-const GAS_ENTRY_POINTS = ['doPost', 'doGet', 'setupProject'];
+// Why real top-level declarations (not a runtime `globalThis.doPost = …`
+// assignment): a runtime-assigned global IS callable by the GAS runtime, but
+// the Apps Script EDITOR's function picker only lists statically-declared
+// top-level functions — so a runtime-assigned entry point shows as
+// "No functions" and cannot be Run from the editor (needed for setupProject /
+// registerRichMenu). A literal `function doPost(e) {…}` is both runtime-callable
+// AND editor-visible.
+const GLOBALS = ['doPost', 'setupProject', 'registerRichMenu'];
 
-const hoist = GAS_ENTRY_POINTS.map(
-  (fn) => `if (App.${fn}) _gasGlobal.${fn} = App.${fn};`
-).join(' ');
-
-const outro = `var _gasGlobal = (function(){ return this || (typeof globalThis !== 'undefined' ? globalThis : {}); })(); ${hoist}`;
+const footer = GLOBALS.map(
+  (fn) => `function ${fn}(e){ return App.${fn} && App.${fn}(e); }`
+).join('\n');
 
 export default {
   input: 'src/main.ts',
-  // `this` at the top of the IIFE === the GAS global object.
-  context: 'this',
   output: {
     dir: 'dist',
     entryFileNames: 'main.js',
     format: 'iife',
-    name: 'App',
-    extend: true,
-    outro,
+    name: 'App', // extend:false (default) → emits a top-level `var App = …`
+    footer,
   },
   plugins: [
     typescript({

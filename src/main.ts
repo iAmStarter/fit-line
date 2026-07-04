@@ -23,6 +23,9 @@ import { buildRejectCard, buildBlockNoticeCard } from './line/flex/reject';
 import { buildSuccessCard } from './line/flex/success';
 import { buildTriggerCard } from './line/flex/trigger';
 import { buildSummaryCard } from './line/flex/summary';
+// Re-exported so the Rollup footer can expose it as an editor-runnable global
+// (owner runs it once to install the rich-menu).
+export { registerRichMenu } from './line/richMenu';
 import {
   appendSubmission,
   ensureEmployee,
