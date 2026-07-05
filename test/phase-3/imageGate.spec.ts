@@ -69,8 +69,13 @@ function fakeBlob(bytes: number[] = [1, 2, 3, 4]): any {
  */
 function installDeterministicDigest(): void {
   g.Utilities.computeDigest = jest.fn((_algo: unknown, value: any): number[] => {
-    const bytes: number[] =
-      value && typeof value.getBytes === 'function' ? value.getBytes() : [];
+    // Real GAS computeDigest takes a byte[] (sha256Hex passes blob.getBytes());
+    // tolerate a Blob too (digestHexOf passes one for seeding).
+    const bytes: number[] = Array.isArray(value)
+      ? value
+      : value && typeof value.getBytes === 'function'
+        ? value.getBytes()
+        : [];
     const out: number[] = [];
     for (let i = 0; i < 32; i++) {
       let acc = i * 31 + 7;

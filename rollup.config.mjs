@@ -11,7 +11,7 @@ import typescript from '@rollup/plugin-typescript';
 // "No functions" and cannot be Run from the editor (needed for setupProject /
 // registerRichMenu). A literal `function doPost(e) {…}` is both runtime-callable
 // AND editor-visible.
-const GLOBALS = ['doPost', 'setupProject', 'registerRichMenu'];
+const GLOBALS = ['doPost', 'doGet', 'setupProject', 'registerRichMenu'];
 
 const footer = GLOBALS.map(
   (fn) => `function ${fn}(e){ return App.${fn} && App.${fn}(e); }`

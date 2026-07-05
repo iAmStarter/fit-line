@@ -30,12 +30,13 @@ import { imageHashExists } from '../sheet/sheetRepo';
  * @returns the 64-char lowercase hex sha256 of the image bytes.
  */
 export function sha256Hex(image: GoogleAppsScript.Base.Blob): string {
-  // GAS digests a Blob directly (its bytes are serialised internally); the
-  // @types overloads only list number[]/string, so cast the Blob through the
-  // number[] overload. Deterministic → the same image always yields the same hex.
+  // GAS `Utilities.computeDigest` accepts a byte[] or string — NOT a Blob (a Blob
+  // throws "parameters (DigestAlgorithm, Blob) do not match" at runtime). Pass the
+  // blob's bytes explicitly. Deterministic → the same image always yields the
+  // same hex.
   const digest = Utilities.computeDigest(
     Utilities.DigestAlgorithm.SHA_256,
-    image as unknown as number[]
+    image.getBytes()
   );
   return digest.map((b) => (b & 0xff).toString(16).padStart(2, '0')).join('');
 }

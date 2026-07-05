@@ -111,27 +111,82 @@ function readSignatureHeader(e: GoogleAppsScript.Events.DoPost): string {
 export function doPost(
   e: GoogleAppsScript.Events.DoPost
 ): GoogleAppsScript.Content.TextOutput {
+  const sp = PropertiesService.getScriptProperties();
   try {
     const body = e?.postData?.contents ?? '';
+    // DELIVERY TRACER (debug "silent bot"): record that doPost was reached,
+    // BEFORE anything can throw, so `doGet` can report whether LINE is actually
+    // delivering webhooks (DIAG_LAST_HIT updates) + what arrived.
+    sp.setProperties({
+      DIAG_LAST_HIT: new Date().toISOString(),
+      DIAG_HIT_COUNT: String(
+        parseInt(sp.getProperty('DIAG_HIT_COUNT') ?? '0', 10) + 1
+      ),
+      DIAG_LAST_EVENTS: summariseEvents(body),
+    });
+
     const signature = readSignatureHeader(e);
     const channelSecret = getProp(PROP_KEYS.LINE_CHANNEL_SECRET);
+    // GAS Web Apps do NOT expose HTTP request headers to doPost, so the
+    // `X-Line-Signature` header is unreachable and cannot be verified there.
+    // When a signature IS available (non-GAS host / a future header-forwarding
+    // proxy) we verify it and drop on mismatch; when it is absent — the GAS
+    // reality — we process anyway.
+    //   SECURITY TRADE-OFF: on GAS the webhook is therefore NOT cryptographically
+    //   authenticated. The compensating controls are the unguessable /exec
+    //   deployment URL + per-user rate-limit + system-wide image dedup. Real
+    //   signature verification requires a host that exposes request headers
+    //   (the Cloud Run / Cloud Functions migration checkpoint). See DESIGN_LOG.
+    const sigOk = signature
+      ? verifySignature(body, signature, channelSecret)
+      : true;
+    sp.setProperty(
+      'DIAG_LAST_SIG',
+      signature ? (sigOk ? 'ok' : 'fail') : 'skipped(no-header)'
+    );
 
-    if (verifySignature(body, signature, channelSecret)) {
-      // Signature verified — route each event. Never throw out of here; any
-      // handler failure is logged inside the handler so LINE still gets 200.
+    if (sigOk) {
+      // Route each event. Never throw out of here; any handler failure is
+      // logged inside the handler so LINE still gets 200.
       routeWebhook(body);
     } else {
-      // LINE must always receive 200; log + ignore an unverified request so no
-      // outbound call (reply/OCR) is ever triggered by a spoofed webhook.
-      Logger.log('Invalid or absent webhook signature; ignoring request.');
+      // A signature WAS present but did not match → likely spoofed; ignore
+      // (still return 200 so LINE does not retry).
+      Logger.log('Webhook signature present but invalid; ignoring request.');
     }
   } catch (err) {
     // doPost must never throw out — LINE always gets a 200 TextOutput.
+    try {
+      sp.setProperty(
+        'DIAG_LAST_ERROR',
+        `${new Date().toISOString()} ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    } catch (diagErr) {
+      Logger.log(`doPost diag write failed: ${diagErr}`);
+    }
     Logger.log(`doPost error: ${err instanceof Error ? err.message : err}`);
   }
   return ContentService.createTextOutput('OK').setMimeType(
     ContentService.MimeType.TEXT
   );
+}
+
+/** Compact summary of the event types in a webhook body (for the diag tracer). */
+function summariseEvents(body: string): string {
+  try {
+    const parsed = JSON.parse(body) as LineWebhookBody;
+    const events = parsed.events ?? [];
+    if (events.length === 0) return '(none)';
+    return events
+      .map((ev) => ev.type + (ev.message ? ':' + ev.message.type : ''))
+      .join(',');
+  } catch (parseErr) {
+    return `(unparseable: ${
+      parseErr instanceof Error ? parseErr.message : String(parseErr)
+    })`;
+  }
 }
 
 /**
@@ -286,9 +341,23 @@ export function handleImageMessage(event: LineWebhookEvent): void {
       'Asia/Bangkok',
       'yyyy-MM-dd'
     );
+    // Backdate window (days) — default 1; widen via the MAX_BACKDATE_DAYS Script
+    // Property to test/demo with older screenshots without a code change.
+    const maxBackdateDays =
+      parseInt(
+        PropertiesService.getScriptProperties().getProperty(
+          'MAX_BACKDATE_DAYS'
+        ) ?? '1',
+        10
+      ) || 1;
     // Apply the full post-OCR rule pipeline: calorie → backdate → dedupDate,
     // short-circuiting at the first failing rule (Phase 4).
-    const result = evaluateSubmissionRules(metrics, userId, todayISO);
+    const result = evaluateSubmissionRules(
+      metrics,
+      userId,
+      todayISO,
+      maxBackdateDays
+    );
 
     if (result.ok) {
       // CR-1 / Phase 8 (auto-save): rules passed → persist IMMEDIATELY, no user
@@ -612,6 +681,48 @@ function isLockTimeout(err: unknown): boolean {
  * OCR_TOKEN) are NOT set here — enter those manually in Project Settings >
  * Script Properties. Idempotent: re-running reuses the existing SHEET_ID.
  */
+/**
+ * Diagnostic health check — GET the /exec URL in a browser to see, WITHOUT
+ * revealing any secret value, which Script Properties are configured and whether
+ * the bot will use the real OCR or the mock. Purely presence booleans; used to
+ * debug "the bot is silent" (a missing LINE_CHANNEL_SECRET / ACCESS_TOKEN makes
+ * doPost verify-drop or fail to reply). Safe to keep — exposes no values.
+ */
+export function doGet(): GoogleAppsScript.Content.TextOutput {
+  const sp = PropertiesService.getScriptProperties();
+  const has = (key: string): boolean => {
+    const v = sp.getProperty(key);
+    return typeof v === 'string' && v.length > 0;
+  };
+  const raw = (key: string): string | null => sp.getProperty(key);
+  const health = {
+    ok: true,
+    time: new Date().toISOString(),
+    props: {
+      LINE_CHANNEL_SECRET: has('LINE_CHANNEL_SECRET'),
+      LINE_CHANNEL_ACCESS_TOKEN: has('LINE_CHANNEL_ACCESS_TOKEN'),
+      OCR_TOKEN: has('OCR_TOKEN'),
+      OCR_BASE_URL: has('OCR_BASE_URL'),
+      SHEET_ID: has('SHEET_ID'),
+    },
+    ocrMode: has('OCR_BASE_URL') && has('OCR_TOKEN') ? 'real' : 'mock',
+    // Webhook-delivery tracer (written by doPost on every hit): if `lastHit`
+    // updates after LINE sends a message, delivery works; if not, LINE is not
+    // reaching us. `lastSig` = did the signature verify; `lastEvents` = what
+    // event types arrived.
+    diag: {
+      lastHit: raw('DIAG_LAST_HIT'),
+      hitCount: raw('DIAG_HIT_COUNT'),
+      lastSig: raw('DIAG_LAST_SIG'),
+      lastEvents: raw('DIAG_LAST_EVENTS'),
+      lastError: raw('DIAG_LAST_ERROR'),
+    },
+  };
+  return ContentService.createTextOutput(
+    JSON.stringify(health, null, 2)
+  ).setMimeType(ContentService.MimeType.JSON);
+}
+
 export function setupProject(): void {
   const props = PropertiesService.getScriptProperties();
   const existing = props.getProperty('SHEET_ID');

@@ -33,7 +33,8 @@ import { dedupDateRule } from './dedupDateRule';
 export function evaluateSubmissionRules(
   m: OcrMetrics,
   userId: string,
-  todayISO: string
+  todayISO: string,
+  maxBackdateDays = 1
 ): RuleResult {
   // 1. Calorie rule (pure) — short-circuit on the first failing rule so the
   //    reject reason is deterministic (earlier rule wins).
@@ -41,8 +42,9 @@ export function evaluateSubmissionRules(
   if (!calorie.ok) {
     return calorie;
   }
-  // 2. Backdate rule (pure) — activity date within the ≤ 1-day window.
-  const backdate = backdateRule(m, todayISO);
+  // 2. Backdate rule (pure) — activity date within the backdate window
+  //    (default 1 day; widened via MAX_BACKDATE_DAYS for testing/demo).
+  const backdate = backdateRule(m, todayISO, maxBackdateDays);
   if (!backdate.ok) {
     return backdate;
   }

@@ -49,8 +49,14 @@ function fakeBlob(bytes: number[]): any {
  */
 function installDeterministicDigest(): void {
   g.Utilities.computeDigest = jest.fn((_algo: unknown, value: any): number[] => {
-    const bytes: number[] =
-      value && typeof value.getBytes === 'function' ? value.getBytes() : [];
+    // Real GAS computeDigest takes a byte[] (or string), NOT a Blob — sha256Hex
+    // passes `blob.getBytes()`. Accept a raw byte[] (the real contract); still
+    // tolerate a Blob for any legacy caller.
+    const bytes: number[] = Array.isArray(value)
+      ? value
+      : value && typeof value.getBytes === 'function'
+        ? value.getBytes()
+        : [];
     // Fold the content into 32 bytes deterministically; sign like GAS (-128..127).
     const out: number[] = [];
     for (let i = 0; i < 32; i++) {

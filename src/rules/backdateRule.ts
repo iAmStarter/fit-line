@@ -61,7 +61,11 @@ export function dayDiff(dateISO: string, todayISO: string): number {
  *
  * SCAFFOLD (Phase 4): stub only — body throws NotImplemented.
  */
-export function backdateRule(m: OcrMetrics, todayISO: string): RuleResult {
+export function backdateRule(
+  m: OcrMetrics,
+  todayISO: string,
+  maxBackdateDays = 1
+): RuleResult {
   // OCR could not read a date → reject (no silent pass): the caller cannot record
   // an unverifiable activity date (PLAN Phase 4 / OVERVIEW risk #2).
   if (m.activityDateISO === null || m.activityDateISO === '') {
@@ -76,10 +80,11 @@ export function backdateRule(m: OcrMetrics, todayISO: string): RuleResult {
     // Activity claimed in the future → invalid.
     return { ok: false, reason: DATE_FUTURE_REASON };
   }
-  if (d < -1) {
-    // Older than yesterday → outside the ≤ 1-day backdate window.
+  if (d < -maxBackdateDays) {
+    // Older than the allowed backdate window (default 1 day; widened via the
+    // MAX_BACKDATE_DAYS Script Property for testing/demo with old screenshots).
     return { ok: false, reason: DATE_TOO_OLD_REASON };
   }
-  // today (0) or yesterday (-1) → within the window.
+  // Within [-maxBackdateDays, 0] → passes.
   return { ok: true };
 }
