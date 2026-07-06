@@ -1,6 +1,7 @@
 # Plan: fit-webhook (LINE OA ↔ Fit-OCR consumer)
 <!-- infra: self-managed (Phase 0 below) — clasp / GAS Web App / Script Properties / Sheet -->
 > Approval: **APPROVED** by owner (Theerasak Duangkaew) 2026-07-04 — full scope P0–P7 incl. P3 stretch. (hard rule 13 — PLAN-APPROVAL gate cleared)
+> **v2 / CR-1 (2026-07-04):** owner approved "Auto-save, no confirm" (docs/CHANGES.md CR-1) → **Phase 8** added below; commercial + plan re-approval both granted via the CR gate. P1/P2/P3/P5 stay `done` (frozen); Phase 8 supersedes the confirm-flow behavior.
 
 Scope (owner-approved 2026-07-04): **Core (P0+P1+P2+Integration) + P3 stretch — ทั้งหมด**.
 Autonomy: **AUTO**. Docs language: **th** (ศัพท์เทคนิคคง English). UI hard rule: **ไม่มี emoji ทุก Flex/UI output**.
@@ -40,7 +41,7 @@ Autonomy: **AUTO**. Docs language: **th** (ศัพท์เทคนิคค�
 
 ## Sprint 1: v1 confirm flow  [goal: ผู้ใช้ส่งรูป → ได้ confirm/reject card → กดยืนยัน → บันทึก Sheet → success card]
 
-## Phase 1: image → OCR(mock) → calorie rule → confirm/reject card  [5 pts]  [status: pending]
+## Phase 1: image → OCR(mock) → calorie rule → confirm/reject card  [5 pts]  [status: done]
 
 - slice: (read path) user ส่งรูป → verify → getContent → OCR(mock) → rule `activeCaloriesKcal ≥ 150` (fallback `totalCaloriesKcal`) → **ผ่าน** ตอบ **confirm card** (กิจกรรม/วันที่/cal + ปุ่ม ยืนยัน/ส่งรูปใหม่) + stash ผลลง Cache; **ไม่ผ่าน** ตอบ **reject card** (โชว์ค่า OCR + เหตุผล + quick-reply cameraRoll). ยังไม่เขียน Sheet.
 - rationale: หัวใจ v1 — พิสูจน์ flow รับรูป→อ่านค่า→ตอบ ด้วย mock OCR โดยไม่ต้องรอ OCR จริง. ส่ง demo แรกที่ user เห็นผล.
@@ -58,7 +59,7 @@ Autonomy: **AUTO**. Docs language: **th** (ศัพท์เทคนิคค�
 - external: **mock only** (ocrMock). OCR จริงยัง block (URL+token ไม่มี) → true E2E เลื่อน Phase 6.
 - TDD: **YES** — RED-first: calorieRule (pure) · router branch · flex builders (assert JSON shape + emoji-free) · cacheStore (mocked CacheService).
 
-## Phase 2: postback ยืนยัน → เขียน Sheet → success card + employee register  [5 pts]  [status: pending]
+## Phase 2: postback ยืนยัน → เขียน Sheet → success card + employee register  [5 pts]  [status: done]
 
 - slice: (write path) user กด **ยืนยัน** (postback) → อ่าน stash จาก Cache → เขียน row ลง `submissions` (status=recorded) → ถ้า user ใหม่ register ลง `employees` → ตอบ **success card**. ครบ round-trip v1 thin slice.
 - rationale: ปิด loop v1 — จากอ่านค่า (Phase 1) สู่ persist จริง + ตอบยืนยัน. นี่คือ milestone จ่ายเงินก้อน 40% (proposal).
@@ -78,7 +79,7 @@ Autonomy: **AUTO**. Docs language: **th** (ศัพท์เทคนิคค�
 
 ## Sprint 2: guards + business rules + summary  [goal: กันสแปม/ซ้ำ/โกง + สรุปผล + chart บน card]
 
-## Phase 3: anti-spam guards — sha256 image dedup + per-user rate-limit  [5 pts]  [status: pending]
+## Phase 3: anti-spam guards — sha256 image dedup + per-user rate-limit  [5 pts]  [status: done]
 
 - slice: ก่อนเรียก OCR → คำนวณ **sha256(image)** ในเครื่อง → ถ้า hash เคยมีใน `submissions` (ทั้งระบบ) = reject "รูปนี้เคยส่งแล้ว" ไม่เรียก OCR; **rate-limit/user** (CacheService, เช่น 5/นาที) เกิน = ตอบคูลดาวน์ ไม่เรียก OCR. เพิ่ม `messageId`+LockService dedup กัน redelivery ซ้ำ.
 - rationale: กัน cost OCR + กันโกง (แชร์รูป/ส่งซ้ำ) — ชั้นที่ 1 ของ 3 (OVERVIEW §6). ต้องมีก่อน swap OCR จริง (Phase 6) เพราะจุดนี้คุม cost+abuse.
@@ -95,7 +96,7 @@ Autonomy: **AUTO**. Docs language: **th** (ศัพท์เทคนิคค�
 - external: none (mock OCR + spy).
 - TDD: **YES** — RED-first: sha256 determinism · dedup lookup · rate-limit counter boundary · lock/idempotency (mocked LockService + SpreadsheetApp).
 
-## Phase 4: business rules — backdate ≤ 1 วัน + no-duplicate (employee+activityDate)  [3 pts]  [status: pending]
+## Phase 4: business rules — backdate ≤ 1 วัน + no-duplicate (employee+activityDate)  [3 pts]  [status: done]
 
 - slice: เพิ่มกติกา P2 ใน 확인 path: **backdate ≤ 1 วัน** (activityDate เก่ากว่า today เกิน 1 วัน → reject) รวม null-handling; **ไม่ซ้ำ** (userId + activityDate มีใน `submissions` แล้ว → reject). เสริม reject reasons.
 - rationale: ชั้นกันโกงที่ 2 (OVERVIEW §6) — อ้างวันซ้ำ/ย้อนวัน. ต่อยอดจาก calorieRule (Phase 1) และ dedup (Phase 3).
@@ -112,7 +113,7 @@ Autonomy: **AUTO**. Docs language: **th** (ศัพท์เทคนิคค�
 - external: none.
 - TDD: **YES** — RED-first: backdateRule boundary table · null-handling · dedupDateRule (mocked Sheet) · pipeline order.
 
-## Phase 5: summary + native bar chart + expanded reject + admin-dispute log  [5 pts]  [status: pending]
+## Phase 5: summary + native bar chart + expanded reject + admin-dispute log  [5 pts]  [status: done]
 
 - slice: success card แสดง **summary** (count สัปดาห์/เดือน/รวม ของ user) + **bar chart (native Flex boxes)**; reject flow ขยาย (เมื่อ fail ≥3 ครั้งบนกิจกรรมเดิม → เพิ่มปุ่ม/ทาง "แจ้งแอดมิน" → log dispute 1/messageId).
 - rationale: ปิด P2 — feedback ที่ user เห็นความคืบหน้า + ช่องทาง dispute manual (OVERVIEW §6/risk #8). ไม่มี external service (chart = Flex boxes → privacy-safe).
@@ -132,7 +133,7 @@ Autonomy: **AUTO**. Docs language: **th** (ศัพท์เทคนิคค�
 
 ## Sprint 3: integration + stretch  [goal: ต่อ OCR จริง + deploy สาธารณะ + stretch features]
 
-## Phase 6: Integration / handover — swap mock → real OCR + real E2E  [3 pts]  [status: pending]
+## Phase 6: Integration / handover — swap mock → real OCR + real E2E  [3 pts]  [status: done]
 
 - slice: เปลี่ยน `ocrMock` → `ocrClient` จริง (real OCR URL+token จาก Script Properties) → contract-test/real E2E ต่อ OCR จริง → เปิด public exposure (dev channel) พร้อมใช้.
 - rationale: จุด swap ที่ proposal ระบุ — OCR จริงมาทีหลัง (ฝั่งเขา Phase 2/3). ก่อนหน้าทั้งหมด build บน mock; ที่นี่พิสูจน์ end-to-end จริง. **นี่คือ phase ที่ external service ต้อง hit จริง.**
@@ -149,7 +150,7 @@ Autonomy: **AUTO**. Docs language: **th** (ศัพท์เทคนิคค�
 - external: **Fit-OCR API (REAL)** — test ต้อง hit real service (`/health` + `/v1/ocr`). LINE dev channel (real webhook).
 - TDD: contract test = **YES** (assert 25-key shape vs real). real E2E = manual staged (no true browser E2E for LINE+GAS) — owner-executed.
 
-## Phase 7: P3 stretch — real identity mapping + rich-menu trigger + advanced chart  [FINAL code phase]  [5 pts]  [status: pending]
+## Phase 7: P3 stretch — real identity mapping + rich-menu trigger + advanced chart  [FINAL code phase]  [5 pts]  [status: done]
 
 - slice: employee **identity mapping จริง** (แทน placeholder-name) · **rich-menu trigger** (ปุ่มบอกวิธีส่งรูป/summary) · **advanced/line chart** (เฉพาะถ้าเกิน Flex boxes — ชั่ง QuickChart/self-host). ปิดงาน + **final deploy**.
 - rationale: stretch ที่ owner approve (in-scope ทั้งหมด). identity mapping = แก้ risk #5; rich-menu = UX เข้าถึงง่าย; advanced chart = ถ้า native Flex ไม่พอ. เป็น phase สุดท้าย → รับ **deploy task บังคับ**.
@@ -169,3 +170,20 @@ Autonomy: **AUTO**. Docs language: **th** (ศัพท์เทคนิคค�
     (fit-webhook = GAS Web App → smoke = `doPost` ต่อ dev channel ตอบ 200 บน invalid-sig payload + real image round-trip; ถ้ามี `/health`-style exec URL → 200)
   - update docs/ENDPOINTS.md with the final deployed base URL (GAS Web App exec URL + LINE dev webhook URL)
 - TDD: **YES** สำหรับ logic (identity resolve, rich-menu routing) — RED-first; advanced chart + rich-menu register = staged manual (owner). Final deploy smoke = manual verify.
+
+## CR-1 change: Sprint 4 (post-v1 change order)
+
+## Phase 8: CR-1 — auto-save (remove confirm step)  [+1.5–2.5d]  [status: done]
+
+- slice: (behavior change) image → verify → gates (rate-limit, sha256 dedup) → OCR → rule pipeline (calorie→backdate→dedupDate) → **PASS → write submissions immediately** (name resolved, imageHash, status=recorded) + register employee + reply **success card** (summary + chart), guarded by messageId+LockService idempotency **on the image path**. **FAIL → reject card** (unchanged). No confirm card, no confirm postback.
+- rationale: CR-1 (owner-approved 2026-07-04) — drop the 2-tap confirm; save on rules-pass. Faster UX; rules remain the gate.
+- architecture: `src/main.ts` `handleImageMessage` — after `evaluateSubmissionRules` ok → move the Phase-2 write (`appendSubmission`+`ensureEmployee`) + Phase-3 `withScriptLock`+`submissionExistsByMessageId` idempotency INLINE here (from `handlePostback`), then `countSubmissions`+`recentDailyValues`→`buildSuccessCard`. Remove `buildConfirmCard` use + the confirm stash (`stashSubmission`/`retrieveSubmission`/`removeSubmission`) + the `action=confirm` postback branch. `handlePostback` keeps dispute/help/summary. DELETE now-dead: `src/line/flex/confirm.ts`, confirm-flow stash usage, and their tests (cacheStore stash tests, confirmCard tests, postback-confirm tests) — or repurpose. Reject/rules/dedup/rate-limit/OCR/identity/rich-menu untouched.
+- acceptance (sharp, testable):
+  - GIVEN image passes all rules (active=200, activityDate=today, not dup) WHEN processed THEN a `submissions` row is appended immediately (status=recorded, name=resolveEmployeeName, imageHash set) AND reply = **success card** (contains "บันทึกแล้ว" + summary "สัปดาห์นี้…") — and there is **no confirm card**, no `action=confirm` needed.
+  - GIVEN webhook redelivery of the SAME messageId WHEN processed concurrently/again THEN exactly **1** `submissions` row (image-path `withScriptLock` + `submissionExistsByMessageId`).
+  - GIVEN rules FAIL (e.g. calorie<150) → reject card (unchanged; fail-counter/dispute unchanged).
+  - edge/negative: a stray `action=confirm&id=…` postback (legacy) → graceful ignore (no throw, doPost 200). Sheet-write throw on the image path → reply "บันทึกไม่สำเร็จ ลองใหม่" (no crash, no partial). LockService timeout → "ระบบไม่ว่าง ลองใหม่".
+- qa focus: write-on-image-path idempotency under redelivery (moved lock) · no confirm card emitted on pass · legacy confirm-postback graceful · success card summary computed after the auto-insert · reject/dispute path unchanged.
+- security: **TRUST BOUNDARY — auto-persist without human review.** Re-threat-model (CHANGES.md CR-1): OCR misread now auto-records (mitigation: rule pipeline gates every save; no manual value edit); redelivery double-write mitigated by the image-path lock (mandatory now); postback `id`-tamper surface reduced. ASVS L2.
+- external: none (mock/real OCR unchanged from P6).
+- TDD: **YES** — RED-first: realign image-path tests (pass→immediate write + success), redelivery idempotency on image path, legacy-confirm-postback graceful; delete dead confirm/stash tests.

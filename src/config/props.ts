@@ -24,6 +24,19 @@ export const PROP_KEYS = {
 export type PropKey = (typeof PROP_KEYS)[keyof typeof PROP_KEYS];
 
 /**
+ * `UrlFetchApp.fetch` timeout (seconds) for the Fit-OCR `/v1/ocr` call — the ONE
+ * knob for OCR latency tolerance.
+ *
+ * DECISION (Phase 6, 10→30): OVERVIEW originally locked `fetchTimeoutSeconds:10`
+ * (SLA p95 2–3 s), but the upstream vision model can take up to 25 s before the
+ * API itself returns 503. A 10 s GAS timeout would abort BEFORE the API on a
+ * worst-case read; 30 s covers the full upstream 25 s while staying well within
+ * the LINE reply-token TTL (~60 s). See research
+ * docs/research/impl-phase-6-ocr-contract.md §"fetchTimeoutSeconds DECISION".
+ */
+export const OCR_FETCH_TIMEOUT_SEC = 30;
+
+/**
  * Read a required Script Property.
  * @throws Error naming the missing key (fail-fast) when absent/empty.
  */
@@ -41,6 +54,18 @@ export function getProp(key: PropKey): string {
  */
 export function getPropOptional(
   key: PropKey,
+  defaultValue?: string
+): string | undefined {
+  const value = PropertiesService.getScriptProperties().getProperty(key);
+  return value ?? defaultValue;
+}
+
+/**
+ * Read an optional Script Property by arbitrary key name (non-required props such
+ * as `MAX_BACKDATE_DAYS`, `DIAG_ENABLED`).
+ */
+export function getOptionalScriptProp(
+  key: string,
   defaultValue?: string
 ): string | undefined {
   const value = PropertiesService.getScriptProperties().getProperty(key);

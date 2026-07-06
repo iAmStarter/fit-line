@@ -1,4 +1,6 @@
-# Proposal — fit-webhook (LINE OA ↔ Fit-OCR consumer)   (v1, 2026-07-04)
+# Proposal — fit-webhook (LINE OA ↔ Fit-OCR consumer)   (v2, 2026-07-04 — CR-1 folded)
+
+> **Changelog v2 (CR-1, 2026-07-04):** removed the user-confirm step — submissions that pass all rules now **auto-save immediately** (image → save → success card; no confirm card / no confirm postback). Adds +1.5–2.5d (+฿13.8k–23k). New total ฿115k–189k. See docs/CHANGES.md.
 
 > Issuer: **iStartSoft** · Client: internal · Currency: **THB** · Rate: **฿8,000/day (placeholder — ปรับได้)** · Contingency: **15%**
 > โปรเจกต์ = ฝั่ง consumer (LINE OA webhook bot, Google Apps Script). ไม่รวมการสร้าง Fit-OCR API.
@@ -29,6 +31,8 @@
 
 - **Core (P0+P1+P2+Integration):** 9–14 ideal-days → **฿83k–129k** (incl. 15% contingency)
 - **+ P3 stretch (optional):** +2–4d → **+฿18k–37k**
+- **+ CR-1 auto-save (v2):** +1.5–2.5d → **+฿13.8k–23k**
+- **New total (Core + P3 + CR-1):** **฿115k–189k**
 
 ## Timeline
 
@@ -52,5 +56,6 @@ Fit-OCR API · LINE fees/paid tier · HR identity integration · LIFF/native · 
 
 ## Sign-off
 
-approved by: **Theerasak Duangkaew (owner)**  date: **2026-07-04**  version: v1
-scope approved: **Core (P0+P1+P2+Integration) + P3 stretch** — ทั้งหมด
+approved by: **Theerasak Duangkaew (owner)**  date: **2026-07-04**  version: **v2**
+scope approved: **Core (P0+P1+P2+Integration) + P3 stretch + CR-1 (auto-save, no confirm)** — ทั้งหมด
+- v1 approved 2026-07-04 (Core + P3). v2 approved 2026-07-04 (CR-1 auto-save folded).

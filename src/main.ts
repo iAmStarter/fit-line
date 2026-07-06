@@ -15,7 +15,76 @@
  */
 
 import { verifySignature } from './line/signature';
-import { getProp, PROP_KEYS } from './config/props';
+import { getProp, getOptionalScriptProp, PROP_KEYS } from './config/props';
+import { getMessageContent, reply, startLoading } from './line/lineClient';
+import { logToSheet } from './sheet/sheetLog';
+import { getRecognizer } from './ocr/ocrClient';
+import { evaluateSubmissionRules } from './rules/rulePipeline';
+import { buildRejectCard, buildBlockNoticeCard } from './line/flex/reject';
+import { buildSuccessCard } from './line/flex/success';
+import { buildTriggerCard } from './line/flex/trigger';
+// Re-exported so the Rollup footer can expose it as an editor-runnable global
+// (owner runs it once to install the rich-menu).
+export { registerRichMenu } from './line/richMenu';
+import {
+  appendSubmission,
+  ensureEmployee,
+  submissionExistsByMessageId,
+  countSubmissions,
+  recentDailyValues,
+  logDispute,
+  resolveEmployeeName,
+} from './sheet/sheetRepo';
+import { rateLimitAllows } from './rules/rateLimit';
+import { sha256Hex, isDuplicateImage } from './rules/imageDedup';
+import { bumpFailCount, shouldOfferDispute } from './rules/disputeGuard';
+import { withScriptLock } from './state/lock';
+import { isSummaryTextTrigger } from './summary/textTrigger';
+import { renderUserSummaryCard } from './summary/renderUserSummary';
+
+/** User-facing coach line when OCR fails/times out (PLAN Phase 1 line 53). */
+const OCR_ERROR_TEXT = 'อ่านรูปไม่สำเร็จ ลองใหม่';
+/** User-facing line when the Sheet write fails (PLAN Phase 2). */
+const SHEET_ERROR_TEXT = 'บันทึกไม่สำเร็จ ลองใหม่';
+/** User-facing line when the per-user rate-limit is exceeded (PLAN Phase 3). */
+const COOLDOWN_TEXT = 'ส่งบ่อยเกินไป รอสักครู่';
+/** User-facing line when the image was already submitted system-wide (Phase 3). */
+const DUPLICATE_IMAGE_TEXT = 'รูปนี้เคยส่งแล้ว';
+/** User-facing line when the script lock times out on the write path (Phase 3). */
+const LOCK_TIMEOUT_TEXT = 'ระบบไม่ว่าง ลองใหม่';
+import { ERROR_COLOR } from './line/flex/tokens';
+/** User-facing ack shown after a dispute is logged (Phase 5). */
+const DISPUTE_ACK_TEXT = 'ส่งเรื่องให้แอดมินตรวจสอบแล้ว';
+/** Postback `action` value for the dispute quick-reply (Phase 5). */
+const DISPUTE_ACTION = 'dispute';
+/** Postback `action` value for the rich-menu "วิธีส่งรูป" button (Phase 7). */
+const HELP_ACTION = 'help';
+/** Postback `action` value for the rich-menu "สรุปของฉัน" button (Phase 7). */
+const SUMMARY_ACTION = 'summary';
+
+/**
+ * Minimal shape of a single LINE webhook event this bot consumes. Only the
+ * fields the router + Phase 1 image handler read are typed; the real LINE
+ * payload has more. `message` is present on `message` events, `postback` on
+ * `postback` events. (Phase 2 fills the postback branch.)
+ */
+export interface LineWebhookEvent {
+  type: string;
+  replyToken?: string;
+  source?: { userId?: string };
+  message?: { id: string; type: string; text?: string };
+  postback?: { data: string };
+}
+
+/** LINE webhook request body: an array of events under `events`. */
+export interface LineWebhookBody {
+  events?: LineWebhookEvent[];
+}
+
+/** True when Script Property `DIAG_ENABLED=1` (webhook delivery tracer). */
+function isDiagEnabled(): boolean {
+  return getOptionalScriptProp('DIAG_ENABLED') === '1';
+}
 
 /** LINE's signature header, case-insensitively. GAS may expose it either on
  * `e.headers` (lowercased) or `e.parameter` (original casing). We tolerate
@@ -47,27 +116,781 @@ function readSignatureHeader(e: GoogleAppsScript.Events.DoPost): string {
 export function doPost(
   e: GoogleAppsScript.Events.DoPost
 ): GoogleAppsScript.Content.TextOutput {
+  const sp = PropertiesService.getScriptProperties();
   try {
     const body = e?.postData?.contents ?? '';
+    // Optional delivery tracer (debug "silent bot") — off by default; set
+    // DIAG_ENABLED=1 in Script Properties to turn on.
+    if (isDiagEnabled()) {
+      sp.setProperties({
+        DIAG_LAST_HIT: new Date().toISOString(),
+        DIAG_HIT_COUNT: String(
+          parseInt(sp.getProperty('DIAG_HIT_COUNT') ?? '0', 10) + 1
+        ),
+        DIAG_LAST_EVENTS: summariseEvents(body),
+      });
+    }
+
     const signature = readSignatureHeader(e);
     const channelSecret = getProp(PROP_KEYS.LINE_CHANNEL_SECRET);
-
-    if (verifySignature(body, signature, channelSecret)) {
-      // Phase 0 skeleton: signature verified. Routing (message | postback),
-      // OCR, and Sheet writes arrive in later phases. Nothing downstream yet.
-      Logger.log(
-        'Valid webhook signature; downstream routing arrives Phase 1.'
+    // GAS Web Apps do NOT expose HTTP request headers to doPost, so the
+    // `X-Line-Signature` header is unreachable and cannot be verified there.
+    // When a signature IS available (non-GAS host / a future header-forwarding
+    // proxy) we verify it and drop on mismatch; when it is absent — the GAS
+    // reality — we process anyway.
+    //   SECURITY TRADE-OFF: on GAS the webhook is therefore NOT cryptographically
+    //   authenticated. The compensating controls are the unguessable /exec
+    //   deployment URL + per-user rate-limit + system-wide image dedup. Real
+    //   signature verification requires a host that exposes request headers
+    //   (the Cloud Run / Cloud Functions migration checkpoint). See DESIGN_LOG.
+    const sigOk = signature
+      ? verifySignature(body, signature, channelSecret)
+      : true;
+    if (isDiagEnabled()) {
+      sp.setProperty(
+        'DIAG_LAST_SIG',
+        signature ? (sigOk ? 'ok' : 'fail') : 'skipped(no-header)'
       );
+    }
+
+    if (sigOk) {
+      // Route each event. Never throw out of here; any handler failure is
+      // logged inside the handler so LINE still gets 200.
+      routeWebhook(body);
     } else {
-      // LINE must always receive 200; log + ignore an unverified request so no
-      // outbound call (reply/OCR) is ever triggered by a spoofed webhook.
-      Logger.log('Invalid or absent webhook signature; ignoring request.');
+      // A signature WAS present but did not match → likely spoofed; ignore
+      // (still return 200 so LINE does not retry).
+      Logger.log('Webhook signature present but invalid; ignoring request.');
     }
   } catch (err) {
     // doPost must never throw out — LINE always gets a 200 TextOutput.
+    if (isDiagEnabled()) {
+      try {
+        sp.setProperty(
+          'DIAG_LAST_ERROR',
+          `${new Date().toISOString()} ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+      } catch (diagErr) {
+        Logger.log(`doPost diag write failed: ${diagErr}`);
+      }
+    }
     Logger.log(`doPost error: ${err instanceof Error ? err.message : err}`);
   }
   return ContentService.createTextOutput('OK').setMimeType(
     ContentService.MimeType.TEXT
+  );
+}
+
+/** Compact summary of the event types in a webhook body (for the diag tracer). */
+function summariseEvents(body: string): string {
+  try {
+    const parsed = JSON.parse(body) as LineWebhookBody;
+    const events = parsed.events ?? [];
+    if (events.length === 0) return '(none)';
+    return events
+      .map((ev) => ev.type + (ev.message ? ':' + ev.message.type : ''))
+      .join(',');
+  } catch (parseErr) {
+    return `(unparseable: ${
+      parseErr instanceof Error ? parseErr.message : String(parseErr)
+    })`;
+  }
+}
+
+/**
+ * Parse the raw webhook body and dispatch each event to its handler.
+ *
+ * Dispatch map:
+ *   - `message` + `message.type === 'image'` -> `handleImageMessage` (Phase 1)
+ *   - `message` + `message.type === 'text'`  -> `handleTextMessage` (CR-2 summary trigger)
+ *   - `postback`                             -> `handlePostback` (Phase 2)
+ *   - anything else (sticker/...)            -> graceful ignore (log only)
+ *
+ * Handler errors are swallowed here so one bad event never fails doPost's 200.
+ *
+ * SCAFFOLD (Phase 1): body throws NotImplemented (GREEN fills dispatch).
+ * @param rawBody raw request body string (already signature-verified).
+ */
+export function routeWebhook(rawBody: string): void {
+  let parsed: LineWebhookBody;
+  try {
+    parsed = JSON.parse(rawBody) as LineWebhookBody;
+  } catch (err) {
+    Logger.log(`routeWebhook: unparseable body — ${err}`);
+    return;
+  }
+
+  const events = parsed.events ?? [];
+  for (const event of events) {
+    // Never let one bad event fail the whole batch (doPost stays 200).
+    try {
+      dispatchEvent(event);
+    } catch (err) {
+      Logger.log(
+        `routeWebhook: handler error — ${
+          err instanceof Error ? err.message : err
+        }`
+      );
+    }
+  }
+}
+
+/**
+ * Route a single event to its handler.
+ *   - `message`(image) -> handleImageMessage (Phase 1)
+ *   - `message`(text)  -> handleTextMessage (CR-2)
+ *   - `postback`       -> handlePostback (Phase 2)
+ *   - anything else    -> graceful ignore (log only)
+ */
+function dispatchEvent(event: LineWebhookEvent): void {
+  if (event.type === 'message' && event.message?.type === 'image') {
+    handleImageMessage(event);
+    return;
+  }
+  if (event.type === 'message' && event.message?.type === 'text') {
+    handleTextMessage(event);
+    return;
+  }
+  if (event.type === 'postback') {
+    handlePostback(event);
+    return;
+  }
+  // Sticker, follow, etc. — graceful ignore (no OCR, no reply).
+  Logger.log(`routeWebhook: ignoring event type "${event.type}".`);
+}
+
+/** Build the graceful OCR-error flex card (shown when OCR throws/times out). */
+function buildErrorCard(): object {
+  return {
+    type: 'flex',
+    altText: OCR_ERROR_TEXT,
+    contents: {
+      type: 'bubble',
+      body: {
+        type: 'box',
+        layout: 'vertical',
+        spacing: 'md',
+        contents: [
+          {
+            type: 'box',
+            layout: 'baseline',
+            spacing: 'sm',
+            paddingAll: '8px',
+            cornerRadius: '4px',
+            backgroundColor: ERROR_COLOR,
+            contents: [
+              {
+                type: 'text',
+                text: '[!]',
+                color: '#ffffff',
+                weight: 'bold',
+                size: 'sm',
+                flex: 0,
+              },
+              {
+                type: 'text',
+                text: 'อ่านรูปไม่สำเร็จ',
+                color: '#ffffff',
+                weight: 'bold',
+                size: 'sm',
+              },
+            ],
+          },
+          {
+            type: 'text',
+            text: OCR_ERROR_TEXT,
+            color: ERROR_COLOR,
+            weight: 'bold',
+            wrap: true,
+          },
+        ],
+      },
+    },
+    quickReply: {
+      items: [
+        {
+          type: 'action',
+          action: { type: 'cameraRoll', label: 'ส่งรูปใหม่' },
+        },
+      ],
+    },
+  };
+}
+
+/**
+ * Phase 1 image-event handler: getContent -> OCR(mock) -> calorieRule ->
+ * (pass) stash + confirm card | (fail) reject card -> reply. On OCR error,
+ * replies a graceful error card. Never throws out (caller keeps doPost at 200).
+ *
+ * SCAFFOLD (Phase 1): body throws NotImplemented (GREEN fills the flow).
+ * @param event a single `message`(image) webhook event.
+ */
+export function handleImageMessage(event: LineWebhookEvent): void {
+  const replyToken = event.replyToken;
+  const messageId = event.message?.id;
+  if (!replyToken || !messageId) {
+    Logger.log(
+      'handleImageMessage: missing replyToken or messageId; ignoring.'
+    );
+    return;
+  }
+
+  const userId = event.source?.userId ?? '';
+
+  // Show the LINE loading animation ("...") immediately so the user can see the
+  // bot is working during the synchronous OCR wait. Best-effort, 1:1 chats only;
+  // it clears automatically when we reply below.
+  if (userId) startLoading(userId);
+
+  try {
+    // 1. Download the image immediately (availability window not guaranteed).
+    const blob = getMessageContent(messageId);
+
+    // GATE 1 — per-user rate-limit (cheapest: O(1) CacheService counter). Over
+    // limit → cooldown notice, do NOT compute the hash or call OCR (Phase 3).
+    if (!rateLimitAllows(userId)) {
+      reply(replyToken, [
+        buildBlockNoticeCard(COOLDOWN_TEXT, {
+          cameraRoll: true,
+          chipLabel: 'กรุณารอ',
+        }),
+      ]);
+      logToSheet('info', 'blocked_ratelimit', userId, messageId);
+      return;
+    }
+
+    // GATE 2 — system-wide sha256 image dedup (O(n) Sheet scan, still < OCR).
+    // Compute the hash BEFORE OCR (the cost gate); a byte-identical resend →
+    // duplicate notice, do NOT call OCR (Phase 3).
+    const imageHash = sha256Hex(blob);
+    if (isDuplicateImage(imageHash)) {
+      reply(replyToken, [
+        buildBlockNoticeCard(DUPLICATE_IMAGE_TEXT, {
+          cameraRoll: true,
+          chipLabel: 'รูปซ้ำ',
+        }),
+      ]);
+      logToSheet('info', 'blocked_duplicate', userId, messageId, imageHash);
+      return;
+    }
+
+    // Gates cleared → recognise metrics. `getRecognizer()` returns the REAL
+    // `ocrClient` when OCR_BASE_URL + OCR_TOKEN are set in Script Properties,
+    // else the dev `ocrMock` (Phase 6 mock↔real swap; caller unchanged). A
+    // recognize() throw (OCR/network/timeout/auth) is caught below → error card.
+    const metrics = getRecognizer().recognize(blob);
+
+    // Today (date-only, Asia/Bangkok) is computed HERE and passed INTO the pure
+    // pipeline so the rules never call `new Date()` (deterministic + testable).
+    const todayISO = Utilities.formatDate(
+      new Date(),
+      'Asia/Bangkok',
+      'yyyy-MM-dd'
+    );
+    // Backdate window (days) — default 1; widen via the MAX_BACKDATE_DAYS Script
+    // Property to test/demo with older screenshots without a code change.
+    const maxBackdateDays =
+      parseInt(
+        PropertiesService.getScriptProperties().getProperty(
+          'MAX_BACKDATE_DAYS'
+        ) ?? '1',
+        10
+      ) || 1;
+    // Apply the full post-OCR rule pipeline: calorie → backdate → dedupDate,
+    // short-circuiting at the first failing rule (Phase 4).
+    const result = evaluateSubmissionRules(
+      metrics,
+      userId,
+      todayISO,
+      maxBackdateDays
+    );
+
+    if (result.ok) {
+      // CR-1 / Phase 8 (auto-save): rules passed → persist IMMEDIATELY, no user
+      // confirm. Build the submission context (OCR + LINE lineage + imageHash),
+      // then serialise the check-then-write under the script-wide lock so a LINE
+      // webhook redelivery of the SAME messageId cannot create a duplicate row
+      // (idempotency moved onto the image path, OVERVIEW risk #4). A waitLock
+      // timeout throws out of withScriptLock → lock-timeout notice (no double
+      // write); a Sheet-write throw → sheet-error notice. In both cases nothing
+      // partial is left behind. On success, counts/dailyValues are read AFTER the
+      // append so this submission is reflected in the running summary (Phase 5).
+      const ctx = { metrics, messageId, userId, imageHash };
+      try {
+        withScriptLock(() => {
+          if (!submissionExistsByMessageId(messageId)) {
+            appendSubmission(ctx);
+            // Register the sender under their resolved roster name (falls back to
+            // the placeholder when unrostered) — the same name the row records.
+            ensureEmployee(userId, resolveEmployeeName(userId));
+          }
+        });
+        const counts = countSubmissions(userId, todayISO);
+        const daily = recentDailyValues(userId, todayISO);
+        reply(replyToken, [buildSuccessCard(ctx, counts, daily, todayISO)]);
+        logToSheet(
+          'info',
+          'recorded',
+          userId,
+          messageId,
+          `cal=${metrics.activeCaloriesKcal ?? metrics.totalCaloriesKcal ?? ''} date=${metrics.activityDateISO ?? ''} activity=${metrics.activityType ?? ''}`
+        );
+      } catch (writeErr) {
+        // Lock timeout → "ระบบไม่ว่าง ลองใหม่" (system-busy, no cameraRoll — an
+        // immediate resend does not help); a Sheet-write failure → "บันทึกไม่สำเร็จ
+        // ลองใหม่". doPost still returns 200.
+        Logger.log(
+          `handleImageMessage auto-save error: ${
+            writeErr instanceof Error ? writeErr.message : writeErr
+          }`
+        );
+        reply(replyToken, [
+          isLockTimeout(writeErr)
+            ? buildBlockNoticeCard(LOCK_TIMEOUT_TEXT, {
+                chipLabel: 'ระบบไม่ว่าง',
+              })
+            : buildSheetErrorCard(),
+        ]);
+        logToSheet(
+          'error',
+          isLockTimeout(writeErr) ? 'lock_timeout' : 'sheet_error',
+          userId,
+          messageId,
+          writeErr instanceof Error ? writeErr.message : String(writeErr)
+        );
+      }
+    } else {
+      // Fail → reply a reject card. Bump the per-(user, activity) reject-streak
+      // counter (disputeGuard, keyed `fc:<userId>:<activityType||unknown>`) and,
+      // once it reaches DISPUTE_FAIL_THRESHOLD, attach the "แจ้งแอดมิน" dispute
+      // quick reply keyed to THIS messageId (Phase 5 auto-offer). The bump happens
+      // ONLY on post-OCR rule rejects — the pre-OCR block paths (rate-limit /
+      // duplicate) return above without touching this counter. `run` and `ride`
+      // accumulate independently because the counter key includes activityType.
+      const failCount = bumpFailCount(userId, metrics.activityType);
+      const disputeMessageId = shouldOfferDispute(failCount)
+        ? messageId
+        : undefined;
+      reply(replyToken, [
+        buildRejectCard(metrics, result.reason ?? 'ไม่ผ่านเงื่อนไข', {
+          disputeMessageId,
+        }),
+      ]);
+      logToSheet(
+        'info',
+        'rejected',
+        userId,
+        messageId,
+        result.reason ?? 'ไม่ผ่านเงื่อนไข'
+      );
+    }
+  } catch (err) {
+    // OCR/network error → graceful error card. Never throw out (doPost = 200).
+    Logger.log(
+      `handleImageMessage error: ${err instanceof Error ? err.message : err}`
+    );
+    logToSheet(
+      'error',
+      'ocr_error',
+      userId,
+      messageId,
+      err instanceof Error ? err.message : String(err)
+    );
+    try {
+      reply(replyToken, [buildErrorCard()]);
+    } catch (replyErr) {
+      Logger.log(`handleImageMessage: error-card reply failed — ${replyErr}`);
+    }
+  }
+}
+
+/**
+ * Extract a named field from a compact postback `data` payload
+ * (`k1=v1&k2=v2&...`). Used to read `action` and `mid` off the dispute
+ * quick-reply (`action=dispute&mid=<messageId>`).
+ * @param data the raw `event.postback.data` string.
+ * @param key  the field name to read.
+ * @returns the field value, or `null` when absent/empty.
+ */
+function parsePostbackField(
+  data: string | undefined,
+  key: string
+): string | null {
+  if (!data) {
+    return null;
+  }
+  for (const pair of data.split('&')) {
+    const eq = pair.indexOf('=');
+    if (eq === -1) continue;
+    if (pair.slice(0, eq) === key) {
+      const value = pair.slice(eq + 1);
+      return value.length > 0 ? value : null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Build the dispute-ack card: a neutral, emoji-free notice shown after a dispute
+ * is logged (Phase 5). Reuses the info/confirm semantic — the report reached the
+ * admin, nothing failed. No button, no quick reply.
+ *
+ * SCAFFOLD (Phase 5): stub only — body throws NotImplemented.
+ */
+function buildDisputeAckCard(): object {
+  const INFO_COLOR = '#2f6fed';
+  return {
+    type: 'flex',
+    altText: DISPUTE_ACK_TEXT,
+    contents: {
+      type: 'bubble',
+      body: {
+        type: 'box',
+        layout: 'vertical',
+        spacing: 'sm',
+        contents: [
+          {
+            type: 'box',
+            layout: 'baseline',
+            spacing: 'sm',
+            contents: [
+              {
+                type: 'text',
+                text: '[i]',
+                color: INFO_COLOR,
+                weight: 'bold',
+                size: 'sm',
+                flex: 0,
+              },
+              {
+                type: 'text',
+                text: DISPUTE_ACK_TEXT,
+                color: INFO_COLOR,
+                weight: 'bold',
+                size: 'sm',
+                wrap: true,
+              },
+            ],
+          },
+        ],
+      },
+    },
+  };
+}
+
+/**
+ * Build the Sheet-write-error card: shown when the datastore write throws.
+ * Error style, no quick reply, no stash deletion (the stash survives for a
+ * retry) (PLAN Phase 2). No emoji.
+ *
+ * SCAFFOLD (Phase 2): stub only — body throws NotImplemented.
+ */
+function buildSheetErrorCard(): object {
+  return {
+    type: 'flex',
+    altText: SHEET_ERROR_TEXT,
+    contents: {
+      type: 'bubble',
+      body: {
+        type: 'box',
+        layout: 'vertical',
+        spacing: 'md',
+        contents: [
+          {
+            type: 'box',
+            layout: 'baseline',
+            spacing: 'sm',
+            paddingAll: '8px',
+            cornerRadius: '4px',
+            backgroundColor: ERROR_COLOR,
+            contents: [
+              {
+                type: 'text',
+                text: '[!]',
+                color: '#ffffff',
+                weight: 'bold',
+                size: 'sm',
+                flex: 0,
+              },
+              {
+                type: 'text',
+                text: 'บันทึกไม่สำเร็จ',
+                color: '#ffffff',
+                weight: 'bold',
+                size: 'sm',
+              },
+            ],
+          },
+          {
+            type: 'text',
+            text: SHEET_ERROR_TEXT,
+            color: ERROR_COLOR,
+            weight: 'bold',
+            wrap: true,
+          },
+        ],
+      },
+    },
+    quickReply: {
+      items: [
+        {
+          type: 'action',
+          action: { type: 'cameraRoll', label: 'ส่งรูปใหม่' },
+        },
+      ],
+    },
+  };
+}
+
+/**
+ * Text-message handler (CR-2): substring `"สรุป"` → on-demand summary card.
+ * Other text is ignored gracefully (no reply). Never throws out.
+ */
+export function handleTextMessage(event: LineWebhookEvent): void {
+  const replyToken = event.replyToken;
+  if (!replyToken) {
+    Logger.log('handleTextMessage: missing replyToken; ignoring.');
+    return;
+  }
+  const text = event.message?.text ?? '';
+  if (!isSummaryTextTrigger(text)) {
+    Logger.log('handleTextMessage: non-summary text; ignoring.');
+    return;
+  }
+  const userId = event.source?.userId ?? '';
+  try {
+    reply(replyToken, [renderUserSummaryCard(userId)]);
+  } catch (err) {
+    Logger.log(
+      `handleTextMessage: summary failed — ${
+        err instanceof Error ? err.message : err
+      }`
+    );
+  }
+}
+
+/**
+ * Postback-event handler (CR-1 / Phase 8: no confirm write path).
+ *
+ * Routes the three live postback actions and gracefully ignores everything else:
+ *   - `action=dispute&mid=<messageId>` → log ONE dispute (idempotent) + ack (P5).
+ *   - `action=help`                    → how-to trigger card (P7 rich-menu).
+ *   - `action=summary`                 → the user's on-demand summary card (P7).
+ *   - anything else, incl. a LEGACY `action=confirm&id=…` from an old confirm
+ *     card still in a chat → graceful IGNORE (no reply, no write, no throw).
+ *
+ * The confirm write path is GONE: passing images now auto-save on the image path
+ * (`handleImageMessage`). Never throws out (caller keeps doPost at 200).
+ * @param event a single `postback` webhook event.
+ */
+export function handlePostback(event: LineWebhookEvent): void {
+  const replyToken = event.replyToken;
+  if (!replyToken) {
+    Logger.log('handlePostback: missing replyToken; ignoring.');
+    return;
+  }
+
+  // Phase 5 dispute branch: a "แจ้งแอดมิน" quick-reply tap arrives as
+  // `action=dispute&mid=<messageId>`. Log ONE dispute for that messageId
+  // (idempotent via disputeExistsByMessageId) and reply a neutral ack. The
+  // activity type is not carried on the dispute postback → pass '' (fine).
+  if (parsePostbackField(event.postback?.data, 'action') === DISPUTE_ACTION) {
+    const mid = parsePostbackField(event.postback?.data, 'mid');
+    const userId = event.source?.userId ?? '';
+    if (mid !== null) {
+      try {
+        logDispute(mid, userId, '', 'user-dispute');
+      } catch (err) {
+        Logger.log(
+          `handlePostback: logDispute failed — ${
+            err instanceof Error ? err.message : err
+          }`
+        );
+      }
+    } else {
+      Logger.log('handlePostback: dispute postback missing mid; ignoring.');
+    }
+    try {
+      reply(replyToken, [buildDisputeAckCard()]);
+    } catch (replyErr) {
+      Logger.log(`handlePostback: dispute-ack reply failed — ${replyErr}`);
+    }
+    return;
+  }
+
+  // Phase 7 rich-menu branches. `action=help` → how-to trigger card;
+  // `action=summary` → the user's on-demand summary (week/month/total + 7-day
+  // bar chart). Both are pulls with no stash — they never touch the confirm
+  // write path. Any handler failure is logged so doPost still returns 200.
+  const action = parsePostbackField(event.postback?.data, 'action');
+  if (action === HELP_ACTION) {
+    try {
+      reply(replyToken, [buildTriggerCard()]);
+    } catch (replyErr) {
+      Logger.log(`handlePostback: help-card reply failed — ${replyErr}`);
+    }
+    return;
+  }
+  if (action === SUMMARY_ACTION) {
+    const userId = event.source?.userId ?? '';
+    try {
+      reply(replyToken, [renderUserSummaryCard(userId)]);
+    } catch (err) {
+      Logger.log(
+        `handlePostback: summary failed — ${
+          err instanceof Error ? err.message : err
+        }`
+      );
+    }
+    return;
+  }
+  // Any other postback — an unknown rich-menu tap OR a LEGACY `action=confirm`
+  // from an old confirm card still sitting in a user's chat — is ignored
+  // GRACEFULLY: no reply, no write, no throw (CR-1 / Phase 8 removed the confirm
+  // write path; passing images now auto-save on the image path). doPost still
+  // returns 200 (PLAN Phase 8 acceptance edge/negative).
+  Logger.log(`handlePostback: ignoring unrouted action "${action ?? ''}".`);
+}
+
+/**
+ * Heuristic: was the thrown error a `LockService.waitLock` timeout (vs a Sheet
+ * write failure)? GAS surfaces a lock timeout as an Error whose message mentions
+ * the lock/timeout; we branch the notice card on it (lock-timeout vs sheet-error).
+ *
+ * SCAFFOLD (Phase 3): stub only — body throws NotImplemented.
+ */
+function isLockTimeout(err: unknown): boolean {
+  const message = (
+    err instanceof Error ? err.message : String(err ?? '')
+  ).toLowerCase();
+  // GAS surfaces a waitLock timeout as an Error whose message mentions the lock
+  // and/or a timeout (e.g. "Could not acquire lock: timeout"). A Sheet-write
+  // failure carries neither → sheet-error card instead.
+  return message.includes('lock') || message.includes('timeout');
+}
+
+/**
+ * ONE-TIME owner setup — run from the Apps Script editor (Run > setupProject),
+ * NOT part of the webhook request path. It (1) creates the backing Google Sheet
+ * `fit-webhook-data` with the 4 tabs (submissions / employees / roster /
+ * disputes) + header rows, and (2) sets the NON-secret Script Properties
+ * (SHEET_ID, OCR_BASE_URL). Running it also grants the script's OAuth scope
+ * consent for the deploying user — which is what flips the deployed /exec Web
+ * App from 403 to live. Secrets (LINE_CHANNEL_SECRET, LINE_CHANNEL_ACCESS_TOKEN,
+ * OCR_TOKEN) are NOT set here — enter those manually in Project Settings >
+ * Script Properties. Idempotent: re-running reuses the existing SHEET_ID.
+ */
+/**
+ * Diagnostic health check — GET the /exec URL in a browser to see, WITHOUT
+ * revealing any secret value, which Script Properties are configured and whether
+ * the bot will use the real OCR or the mock. Purely presence booleans; used to
+ * debug "the bot is silent" (a missing LINE_CHANNEL_SECRET / ACCESS_TOKEN makes
+ * doPost verify-drop or fail to reply). Safe to keep — exposes no values.
+ */
+export function doGet(): GoogleAppsScript.Content.TextOutput {
+  const sp = PropertiesService.getScriptProperties();
+  const has = (key: string): boolean => {
+    const v = sp.getProperty(key);
+    return typeof v === 'string' && v.length > 0;
+  };
+  const raw = (key: string): string | null => sp.getProperty(key);
+  const health = {
+    ok: true,
+    time: new Date().toISOString(),
+    props: {
+      LINE_CHANNEL_SECRET: has('LINE_CHANNEL_SECRET'),
+      LINE_CHANNEL_ACCESS_TOKEN: has('LINE_CHANNEL_ACCESS_TOKEN'),
+      OCR_TOKEN: has('OCR_TOKEN'),
+      OCR_BASE_URL: has('OCR_BASE_URL'),
+      SHEET_ID: has('SHEET_ID'),
+    },
+    ocrMode: has('OCR_BASE_URL') && has('OCR_TOKEN') ? 'real' : 'mock',
+  };
+  if (isDiagEnabled()) {
+    Object.assign(health, {
+      diag: {
+        lastHit: raw('DIAG_LAST_HIT'),
+        hitCount: raw('DIAG_HIT_COUNT'),
+        lastSig: raw('DIAG_LAST_SIG'),
+        lastEvents: raw('DIAG_LAST_EVENTS'),
+        lastError: raw('DIAG_LAST_ERROR'),
+      },
+    });
+  }
+  return ContentService.createTextOutput(
+    JSON.stringify(health, null, 2)
+  ).setMimeType(ContentService.MimeType.JSON);
+}
+
+export function setupProject(): void {
+  const props = PropertiesService.getScriptProperties();
+  const existing = props.getProperty('SHEET_ID');
+  const ss = existing
+    ? SpreadsheetApp.openById(existing)
+    : SpreadsheetApp.create('fit-webhook-data');
+
+  const tabs = [
+    {
+      name: 'submissions',
+      headers: [
+        'messageId', 'userId', 'name', 'activityType', 'activityDateISO',
+        'submittedAtISO', 'activeCaloriesKcal', 'totalCaloriesKcal', 'distanceKm',
+        'source', 'confidence', 'status', 'rejectReason', 'imageHash',
+      ],
+    },
+    { name: 'employees', headers: ['userId', 'name', 'registeredAtISO'] },
+    { name: 'roster', headers: ['userId', 'name'] },
+    {
+      name: 'disputes',
+      headers: ['messageId', 'userId', 'activityType', 'reason', 'disputedAtISO'],
+    },
+    {
+      name: 'logs',
+      headers: ['timestamp', 'level', 'event', 'userId', 'messageId', 'detail'],
+    },
+  ];
+
+  for (let i = 0; i < tabs.length; i++) {
+    const t = tabs[i];
+    const sheet = ss.getSheetByName(t.name) || ss.insertSheet(t.name);
+    if (!sheet.getRange(1, 1).getValue()) {
+      sheet.getRange(1, 1, 1, t.headers.length).setValues([t.headers]);
+    }
+  }
+
+  if (!existing) {
+    const def = ss.getSheetByName('Sheet1');
+    if (def) ss.deleteSheet(def);
+  }
+
+  props.setProperty('SHEET_ID', ss.getId());
+  props.setProperty('OCR_BASE_URL', 'https://fit-ocr.istartsoft.dev');
+  // Prod default: allow weekend catch-up (Mon submit for Sat/Sun workout).
+  if (!props.getProperty('MAX_BACKDATE_DAYS')) {
+    props.setProperty('MAX_BACKDATE_DAYS', '2');
+  }
+
+  Logger.log('SETUP DONE — SHEET_ID=' + ss.getId());
+  Logger.log('Sheet URL=' + ss.getUrl());
+  Logger.log(
+    'Now set the SECRETS in Project Settings > Script Properties: ' +
+      'LINE_CHANNEL_SECRET, LINE_CHANNEL_ACCESS_TOKEN, OCR_TOKEN',
+  );
+}
+
+/**
+ * Owner-runnable prod defaults — run once from the Apps Script editor after deploy.
+ * Sets `MAX_BACKDATE_DAYS=2` when unset (weekend catch-up). Does NOT touch secrets.
+ */
+export function setProdDefaults(): void {
+  const props = PropertiesService.getScriptProperties();
+  if (!props.getProperty('MAX_BACKDATE_DAYS')) {
+    props.setProperty('MAX_BACKDATE_DAYS', '2');
+  }
+  Logger.log(
+    'setProdDefaults done — MAX_BACKDATE_DAYS=' +
+      (props.getProperty('MAX_BACKDATE_DAYS') ?? '1')
   );
 }
