@@ -16,11 +16,9 @@
 
 import type { StashedContext, SubmissionCounts } from '../../types/ocrMetrics';
 import { buildBarChart } from './chart';
+import { formatSummaryLine } from './summaryLine';
+import { SUCCESS_COLOR, SUCCESS_TINT, MUTED_COLOR } from './tokens';
 
-/** Success semantic color (OVERVIEW §4). */
-const SUCCESS_COLOR = '#1e9e57';
-/** Light green tint for the status-chip background. */
-const SUCCESS_TINT = '#e5f7f0';
 /** Recorded-confirmation headline text. */
 const RECORDED_TEXT = 'บันทึกแล้ว';
 
@@ -77,6 +75,7 @@ function statusChip(): object {
  * @param ctx         the stashed submission context just written to the sheet.
  * @param counts      optional per-user recorded tallies (week/month/total).
  * @param dailyValues optional last-7-day per-day summed calories (oldest→today).
+ * @param todayISO    optional `yyyy-MM-dd` anchor for chart day-of-week labels.
  * @returns a LINE flex message object (green success style, no emoji).
  *
  * SCAFFOLD (Phase 5): the summary+chart branch throws NotImplemented; the
@@ -85,15 +84,13 @@ function statusChip(): object {
 export function buildSuccessCard(
   ctx: StashedContext,
   counts?: SubmissionCounts,
-  dailyValues?: number[]
+  dailyValues?: number[],
+  todayISO?: string
 ): object {
   const calorie = displayCalorie(ctx);
 
   if (counts !== undefined && dailyValues !== undefined) {
-    // Phase 5: append a summary section (week / month / total) + a native-Flex
-    // bar chart below the recorded-calorie line. Green success style, no emoji,
-    // no external URL (the chart is native Flex boxes).
-    const summaryText = `สัปดาห์นี้ ${counts.week} · เดือนนี้ ${counts.month} · รวม ${counts.total}`;
+    const summaryText = formatSummaryLine(counts);
     const bubble = {
       type: 'bubble',
       body: {
@@ -113,10 +110,10 @@ export function buildSuccessCard(
             type: 'text',
             text: summaryText,
             size: 'sm',
-            color: '#666666',
+            color: MUTED_COLOR,
             wrap: true,
           },
-          buildBarChart(dailyValues),
+          buildBarChart(dailyValues, todayISO),
         ],
       },
     };

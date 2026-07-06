@@ -1,11 +1,11 @@
 # STATE
 
 phase: DONE (P0–P8/CR-1) + **DEPLOYED LIVE** + post-deploy hotfixes. Handoff to Claude CLI.
-plan: APPROVED 2026-07-04 (proposal v2, Core P0–P7 + P3 stretch + CR-1 auto-save). tests 245/245 (+3 skipped real-contract).
+plan: APPROVED 2026-07-04 (proposal v2, Core P0–P7 + P3 stretch + CR-1 auto-save). tests 248/251 (+3 skipped real-contract).
 
 ## LIVE DEPLOYMENT (istartsoft@gmail.com)
 - GAS scriptId `1vlDM3FgYBe9V6EWOB1CJHw8ivM_jUtiUb8pxxjfK-OC4PJOXXvTvG5Dq` · editor: script.google.com/d/<scriptId>/edit
-- Web App /exec (deployment id, STABLE across redeploys): `AKfycbypaajrnOyakam0WxAYAtCMBVNBmYcuyQBzYnHSA7y4r2i2iJswohA6ynPKjtjbY-3pIw` → currently **@9**
+- Web App /exec (deployment id, STABLE across redeploys): `AKfycbypaajrnOyakam0WxAYAtCMBVNBmYcuyQBzYnHSA7y4r2i2iJswohA6ynPKjtjbY-3pIw` → currently **@11** (`ux: flex polish + clearer copy + chart labels`, 2026-07-06)
 - redeploy KEEPING the URL: `npx clasp deploy -i <that id> -d "..."` (NEVER `clasp deploy` bare — that mints a new URL). `.clasp.json` (rootDir dist, gitignored) has the scriptId. build = `npm run build`, then `npx clasp push -f`.
 - Sheet `fit-webhook-data` (SHEET_ID in Script Properties): tabs submissions/employees/roster/disputes/logs. Created + non-secret props set by running `setupProject` in the editor.
 - Script Properties (health-verified all present): LINE_CHANNEL_SECRET, LINE_CHANNEL_ACCESS_TOKEN, OCR_TOKEN, OCR_BASE_URL, SHEET_ID. Optional: MAX_BACKDATE_DAYS (default 1).
@@ -20,12 +20,18 @@ plan: APPROVED 2026-07-04 (proposal v2, Core P0–P7 + P3 stretch + CR-1 auto-sa
 - **Real OCR verified live:** POST /v1/ocr (multipart field `image`, Bearer) returns the real 25-key OcrResult. Note: OCR service is FLAKY on some images (HTTP 503 "upstream error", ~25s) — ocrClient handles non-200 → "อ่านรูปไม่สำเร็จ".
 - **Test-image reality:** the Downloads/รูปออกกำลังกาย screenshots are OLD workouts (OCR reads in-image dates 2020/2024/2026) → rejected by backdate unless MAX_BACKDATE_DAYS is widened. Two 2026-05 images (120200, 114616) RECORD at MAX_BACKDATE_DAYS≥47.
 
+## 2026-07-05 · two live-bug fixes — **DEPLOYED @10** (2026-07-06)
+- **BUG (IMG_5804): card showed week=0·month=0·chart all-0 while `รวม` was right.** Root cause: Sheets coerces the `activityDateISO` string → Date on write; `dateOnly()` didn't handle Date → matched no `yyyy-MM-dd` window. Fix (read-side): `dateOnly` formats a `Date` via `Utilities.formatDate(...,'Asia/Bangkok','yyyy-MM-dd')`. No migration. **TZ caveat: Sheet timezone must = Asia/Bangkok.** See ISSUES.md.
+- **RULE change "1 วัน = 1 ครั้ง" (owner-approved):** `countSubmissions` now tallies DISTINCT activity days, not rows — 2 workouts one day count once. Rows still stored (calories kept). Live duplicate rows collapse automatically.
+- tests 248/251 (+3 new, +3 skipped real-contract) · tsc/build clean · **live @10** (health GET /exec ok 2026-07-06).
+
 ## NEXT (for CLI session)
-1. Confirm a real `recorded` end-to-end (MAX_BACKDATE_DAYS=90 + send 120200) — was the last step in progress.
+1. Owner: confirm card shows week/month/chart ≠ 0 (send รูปใหม่ หรือกด rich-menu สรุป). Sheet timezone = Asia/Bangkok.
 2. Owner: revoke + re-mint the OCR token (it was pasted in chat earlier → exposed).
 3. Decide prod MAX_BACKDATE_DAYS (1 strict, or 2–3 to allow weekend catch-up).
 4. Consider trimming the DIAG_* tracer + doGet health once stable (or keep behind a flag).
-5. Everything committed on branch `feat/p0-p7` (NOT pushed to GitHub).
+5. Commit + push branch `feat/p0-p7` to GitHub (uncommitted local changes remain).
+6. CR-2 (text-trigger "สรุป") — proposed, awaiting owner approval.
 
 ## Locked decisions (carry)
 - sync + reply-token · AUTO/decide mode · Thai docs · no emoji in Flex/UI

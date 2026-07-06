@@ -38,3 +38,37 @@ CR-1 | 2026-07-04 | remove user-confirm step — auto-save immediately when rule
 - **Timeline Δ: +~0.5 week.** Everything else (P0, rules, summary/chart/dispute, real OCR, identity, rich-menu, deploy) is unchanged — the re-price is only the confirm→auto-save seam + its tests.
 
 **status: APPROVED** — owner selected "Approve — proceed" 2026-07-04. Commercial gate + plan re-approval (rule 13) both granted via this decision. Implemented as **Phase 8** (done phases P1/P2/P3/P5 stay frozen; Phase 8 applies the delta).
+
+---
+
+```
+CR-2 | 2026-07-05 | เพิ่ม text-trigger รายงาน — พิมพ์ "สรุปออกกำลัง"/มี "สรุป" → ตอบ summary card เดิม (week/month/total + 7-day chart) | impact: P1 dispatchEvent (frozen, ALTERED: text เดิม ignore → route keyword) + reuse P5/P7 summary render (no change) | effort Δ: +0.25–0.5d | cost Δ: +฿2.3k–4.6k | new total: ฿117k–194k | status: proposed
+```
+
+## CR-2 detail — text-trigger สรุปออกกำลัง
+
+**Requested:** "เพิ่มให้ดูรายงานได้ เช่นพิมพ์บอกว่า 'สรุปออกกำลัง' หรืออะไรทำนองนี้" — ให้ผู้ใช้เรียกดูรายงานด้วยการพิมพ์ข้อความ (ตอนนี้เรียกได้ทางปุ่ม rich-menu `action=summary` เท่านั้น).
+
+**สำคัญ — 90% มีอยู่แล้ว:** `buildSummaryCard(counts, daily)` + `countSubmissions` + `recentDailyValues` render อยู่แล้ว (P5), เรียกผ่าน postback `action=summary` (P7 rich-menu). CR นี้เพิ่ม *ช่องทาง input ใหม่* ไม่ใช่ feature ใหม่ทั้งก้อน.
+
+### Impact (done phases FROZEN — เพิ่ม text branch = added rework เล็ก)
+| area | change |
+|---|---|
+| P1 `dispatchEvent` | ปัจจุบัน `message.type==='text'` → graceful ignore. เพิ่ม branch: text ที่ trimmed มี `"สรุป"` → summary. อื่น ๆ ยัง ignore |
+| P5/P7 summary | extract summary-render (`countSubmissions`+`recentDailyValues`+`buildSummaryCard`) เป็น helper เดียว → เรียกจากทั้ง postback และ text (dedupe) |
+| unchanged | image flow, rules, dedup, rate-limit, OCR, dispute, rich-menu, auto-save, deploy |
+
+### Keyword rule (design decision)
+เลือก **substring match `"สรุป"`** (trimmed) — ครอบ "สรุปออกกำลัง" / "สรุป" / "ขอสรุป" / "สรุปของฉัน". false-positive ต่ำสำหรับบอทออกกำลังกาย. ทางเลือกอื่น: exact "สรุปออกกำลัง" (แคบไป, ผู้ใช้พิมพ์ไม่ตรงพลาด) หรือ regex list. → เสนอ substring.
+
+### Security re-threat-model
+- read-only pull เหมือน postback summary — ไม่มี write, ไม่มี trust boundary ใหม่. เท่าเดิม.
+- text summary ไม่มี rate-limit (สอดคล้อง postback summary ที่ก็ไม่มี). spam = reply-only, ไม่กระทบข้อมูล. accept.
+
+### Re-estimate (delta only, same config: THB ฿8k/d +15%)
+- text dispatch branch + keyword rule (~0.1d) · extract summary helper + rewire postback (~0.1d) · tests: text→summary / non-match→ignore / helper (~0.1–0.2d) · gates + deploy verify (~0.05d) = **+0.25–0.5 dev-day**.
+- cost Δ = 0.25–0.5d × ฿8,000 × 1.15 = **+฿2,300–4,600**.
+- baseline v2 ฿115k–189k → **new total ฿117k–194k**.
+- **Timeline Δ: ~0 (ภายในวันเดียว).** ทุกอย่างอื่นคงเดิม — จ่ายเฉพาะ seam text-trigger + tests.
+
+**status: proposed** — รออนุมัติ (commercial gate).

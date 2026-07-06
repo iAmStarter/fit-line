@@ -34,3 +34,14 @@
 - **root cause:** `sha256Hex` passed the Blob to `Utilities.computeDigest` (a prior impl assumed GAS digests a Blob directly). Real GAS `computeDigest` accepts `byte[]` or `string`, NOT a Blob. The Phase-3 test mocks encoded the WRONG contract (read `value.getBytes()`), so they never caught it.
 - **fix:** `Utilities.computeDigest(SHA_256, image.getBytes())`. Reconciled the imageDedup/imageGate digest mocks to accept a `byte[]` (real contract) as well as a Blob.
 - **status:** RESOLVED — 245/245 jest; deployed @9.
+
+## 2026-07-05 · LIVE · success/summary card shows week=0 · month=0 · chart all-0 while total is right (IMG_5804)
+- **symptom:** card reads `รวม 1` but `สัปดาห์นี้ 0 · เดือนนี้ 0` and every 7-day bar = 0, for a workout dated 04 กค 2569 (2026-07-04) submitted 2026-07-05 — clearly inside both windows.
+- **root cause:** Google Sheets auto-coerces the written `"yyyy-MM-dd"` `activityDateISO` string into a **date value**; `getValues()` returns it as a JS `Date`, not a string. `dateOnly()` did `String(cell).split('T')[0]` → `"Sat Jul 04 2026 …"` (no `'T'`), which matches no `yyyy-MM-dd` window. `total` (unconditional `++`) stayed correct; `week`/`month` string-compares and `recentDailyValues` dateIndex lookups all failed → 0. Jest mocks store strings, never Date coercion (the +3 skipped real-contract tests are exactly this gap).
+- **fix:** `dateOnly` now handles `Date`: `if (cell instanceof Date) return Utilities.formatDate(cell, 'Asia/Bangkok', 'yyyy-MM-dd')`. Read-side only — no data migration; existing broken rows fix themselves on next read. **TZ caveat:** Sheet timezone must be Asia/Bangkok or Dates skew ±1 day. Regression tests seed date cells as JS `Date` (RED-first proven: old impl → week/chart 0).
+- **status:** RESOLVED — deployed @10 (2026-07-06). Owner verify: summary card week/month/chart ≠ 0.
+
+## 2026-07-05 · LIVE · same-day rule "1 วัน = 1 ครั้ง" — counts changed to distinct days (owner-approved)
+- **context:** IMG_5804 showed two DIFFERENT workouts on 04 กค (169 kcal 17:39 + 151 kcal 19:25) both recorded → `รวม` went 1→2. Owner decided a day counts once regardless of how many workouts (B2: keep both rows, tally by day).
+- **change:** `countSubmissions` now counts DISTINCT `activityDateISO` values per bucket (Set of dates) instead of rows. Rows are still stored (calories preserved for the chart, which already sums per-day). No data migration — the two live duplicate rows collapse to 1 day automatically. `SubmissionCounts` JSDoc updated. New test: two same-day workouts + one other day → week/month/total = 2.
+- **status:** RESOLVED — deployed @10 (2026-07-06) with the dateOnly fix above.

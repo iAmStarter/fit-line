@@ -18,8 +18,8 @@
 import type { RuleResult } from '../types/ocrMetrics';
 import { hasRecordedSubmission } from '../sheet/sheetRepo';
 
-/** Reject reason: this user already has a recorded submission for that date. */
-export const DUPLICATE_DATE_REASON = 'วันนี้บันทึกไปแล้ว';
+/** Reject reason: this user already has a recorded submission for that activity date. */
+export const DUPLICATE_DATE_REASON = 'บันทึกวันที่นี้ไปแล้ว';
 
 /**
  * Apply the no-duplicate rule for a (userId, activityDate) pair.

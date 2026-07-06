@@ -180,6 +180,22 @@ describe('countSubmissions — week / month / total (recorded only)', () => {
     const counts = countSubmissions('U', TODAY);
     expect(counts).toEqual({ week: 0, month: 0, total: 0 });
   });
+
+  // "1 วัน = 1 ครั้ง" (owner-approved 2026-07-05, IMG_5804): two workouts on the
+  // same day are BOTH stored but count as ONE day in every bucket.
+  it('collapses multiple same-day workouts to one day per bucket', () => {
+    installSheet([
+      // two recorded workouts on the SAME day (today) — like the 169 + 151 pair
+      row({ userId: 'U', activityDateISO: '2026-07-08', status: 'recorded' }),
+      row({ userId: 'U', activityDateISO: '2026-07-08', status: 'recorded' }),
+      // a second distinct day this week
+      row({ userId: 'U', activityDateISO: '2026-07-06', status: 'recorded' }),
+    ]);
+    const counts = countSubmissions('U', TODAY);
+    expect(counts.week).toBe(2); // 07-08 (x2 → 1) + 07-06 = 2 days
+    expect(counts.month).toBe(2);
+    expect(counts.total).toBe(2);
+  });
 });
 
 describe('recentDailyValues — 7-day per-day summed calories (oldest → today)', () => {
@@ -282,5 +298,53 @@ describe('recentDailyValues — 7-day per-day summed calories (oldest → today)
     installSheet([]);
     const values = recentDailyValues('U', TODAY);
     expect(values).toEqual([0, 0, 0, 0, 0, 0, 0]);
+  });
+});
+
+/**
+ * Regression (LIVE bug 2026-07-05, IMG_5804): Google Sheets auto-coerces a
+ * written `"yyyy-MM-dd"` string into a date value, so `getValues()` returns the
+ * `activityDateISO` cell as a JS `Date` — not a string. The old `dateOnly` did
+ * `String(date).split('T')[0]` → `"Sat Jul 04 2026 …"`, which matched no window,
+ * silently zeroing week/month (and every chart bar) while `total` stayed right.
+ * These assertions FAIL against the old impl and pass with the Date-aware fix.
+ */
+describe('date cells arriving as JS Date (Sheets coercion) — regression', () => {
+  /** Midnight Bangkok Date, exactly what getValues() hands back for a date cell. */
+  function bkkDate(iso: string): Date {
+    return new Date(`${iso}T00:00:00+07:00`);
+  }
+  /** Row whose activityDateISO cell is a Date (not a string). */
+  function dateRow(spec: RowSpec): unknown[] {
+    const r = row(spec);
+    const dateCol = SUBMISSIONS_HEADER.indexOf('activityDateISO');
+    r[dateCol] = bkkDate(spec.activityDateISO);
+    return r;
+  }
+
+  it('counts week/month/total correctly when date cells are Date objects', () => {
+    installSheet([
+      dateRow({ userId: 'U', activityDateISO: '2026-07-08', status: 'recorded' }),
+      dateRow({ userId: 'U', activityDateISO: '2026-07-06', status: 'recorded' }),
+      dateRow({ userId: 'U', activityDateISO: '2026-07-01', status: 'recorded' }),
+      dateRow({ userId: 'U', activityDateISO: '2026-06-20', status: 'recorded' }),
+    ]);
+    const counts = countSubmissions('U', TODAY);
+    expect(counts.week).toBe(2); // 07-06, 07-08
+    expect(counts.month).toBe(3); // 07-01, 07-06, 07-08
+    expect(counts.total).toBe(4);
+  });
+
+  it('sums the daily chart correctly when date cells are Date objects', () => {
+    installSheet([
+      dateRow({
+        userId: 'U',
+        activityDateISO: '2026-07-08',
+        status: 'recorded',
+        activeCaloriesKcal: 169,
+      }),
+    ]);
+    const values = recentDailyValues('U', TODAY);
+    expect(values[6]).toBe(169); // today's bar, not 0
   });
 });

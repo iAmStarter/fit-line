@@ -121,16 +121,17 @@ export interface StashedContext {
 
 /**
  * Per-user submission tallies shown on the success card summary (Phase 5).
- * All counts are RECORDED-only. `week` = Monday→Sunday of the current week
- * (Asia/Bangkok); `month` = the current `yyyy-MM`; `total` = all recorded rows
- * for the user.
+ * Counts are RECORDED-only and count DISTINCT activity DAYS, not rows: two
+ * workouts on the same day count once ("1 วัน = 1 ครั้ง"). `week` = Monday→Sunday
+ * of the current week (Asia/Bangkok); `month` = the current `yyyy-MM`; `total` =
+ * all recorded days for the user.
  */
 export interface SubmissionCounts {
-  /** Recorded submissions this week (Mon→Sun, Asia/Bangkok). */
+  /** Distinct recorded activity days this week (Mon→Sun, Asia/Bangkok). */
   week: number;
-  /** Recorded submissions this calendar month (current `yyyy-MM`). */
+  /** Distinct recorded activity days this calendar month (current `yyyy-MM`). */
   month: number;
-  /** All recorded submissions for the user, all time. */
+  /** Distinct recorded activity days for the user, all time. */
   total: number;
 }
 

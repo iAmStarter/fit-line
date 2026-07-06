@@ -22,9 +22,16 @@ import type { OcrMetrics, RuleResult } from '../types/ocrMetrics';
 /** Reject reason: OCR could not read the activity date from the screenshot. */
 export const DATE_UNREADABLE_REASON =
   'อ่านวันที่จากรูปไม่ได้ ส่งรูปที่เห็นวันที่ชัด';
-/** Reject reason: the activity date is older than the ≤ 1-day backdate window. */
-export const DATE_TOO_OLD_REASON =
-  'วันที่กิจกรรมเก่าเกินกำหนด (ย้อนหลังได้ ≤ 1 วัน)';
+/** Reject reason: the activity date is older than the allowed backdate window. */
+export function dateTooOldReason(maxBackdateDays = 1): string {
+  if (maxBackdateDays <= 1) {
+    return 'วันที่กิจกรรมเก่าเกินกำหนด (ย้อนหลังได้เฉพาะวันนี้หรือเมื่อวาน)';
+  }
+  return `วันที่กิจกรรมเก่าเกินกำหนด (ย้อนหลังได้ไม่เกิน ${maxBackdateDays} วัน)`;
+}
+
+/** Default too-old reason when `maxBackdateDays` is 1 (tests import this). */
+export const DATE_TOO_OLD_REASON = dateTooOldReason(1);
 /** Reject reason: the activity date is in the future (invalid). */
 export const DATE_FUTURE_REASON = 'วันที่กิจกรรมไม่ถูกต้อง';
 
@@ -83,7 +90,7 @@ export function backdateRule(
   if (d < -maxBackdateDays) {
     // Older than the allowed backdate window (default 1 day; widened via the
     // MAX_BACKDATE_DAYS Script Property for testing/demo with old screenshots).
-    return { ok: false, reason: DATE_TOO_OLD_REASON };
+    return { ok: false, reason: dateTooOldReason(maxBackdateDays) };
   }
   // Within [-maxBackdateDays, 0] → passes.
   return { ok: true };

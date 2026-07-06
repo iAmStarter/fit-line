@@ -59,3 +59,15 @@ export function getPropOptional(
   const value = PropertiesService.getScriptProperties().getProperty(key);
   return value ?? defaultValue;
 }
+
+/**
+ * Read an optional Script Property by arbitrary key name (non-required props such
+ * as `MAX_BACKDATE_DAYS`, `DIAG_ENABLED`).
+ */
+export function getOptionalScriptProp(
+  key: string,
+  defaultValue?: string
+): string | undefined {
+  const value = PropertiesService.getScriptProperties().getProperty(key);
+  return value ?? defaultValue;
+}

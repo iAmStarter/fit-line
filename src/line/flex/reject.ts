@@ -18,14 +18,12 @@
  */
 
 import type { OcrMetrics } from '../../types/ocrMetrics';
+import { ERROR_COLOR, MUTED_COLOR } from './tokens';
 
-/** Error/reject semantic color (OVERVIEW §4). */
-const ERROR_COLOR = '#d64545';
-/** Muted color for secondary metadata. */
-const MUTED_COLOR = '#666666';
-
-/** Render a nullable number for display, blank OCR reading → "-". */
-function displayNumber(value: number | null): string {
+/** User-facing calorie: prefer active, else total (same rule as calorieRule). */
+function displayCalorie(m: OcrMetrics): string {
+  const value =
+    m.activeCaloriesKcal !== null ? m.activeCaloriesKcal : m.totalCaloriesKcal;
   return value !== null ? String(value) : '-';
 }
 
@@ -59,8 +57,7 @@ export function buildRejectCard(
   opts?: { disputeMessageId?: string }
 ): object {
   const activityType = m.activityType ?? '-';
-  const active = displayNumber(m.activeCaloriesKcal);
-  const total = displayNumber(m.totalCaloriesKcal);
+  const calorie = displayCalorie(m);
 
   const bubble = {
     type: 'bubble',
@@ -105,15 +102,9 @@ export function buildRejectCard(
         },
         {
           type: 'text',
-          text: `แคลอรี่ (active): ${active} kcal`,
+          text: `แคลอรี่: ${calorie} kcal`,
           size: 'md',
           weight: 'bold',
-        },
-        {
-          type: 'text',
-          text: `แคลอรี่ (total): ${total} kcal`,
-          size: 'sm',
-          color: MUTED_COLOR,
         },
         {
           type: 'text',
@@ -173,13 +164,15 @@ export function buildRejectCard(
  * system-busy lock-timeout where an immediate resend does not help.
  *
  * @param reason human-facing coach line explaining the block.
- * @param opts   optional flags; `cameraRoll` attaches a `cameraRoll` quick reply.
+ * @param opts   optional flags; `cameraRoll` attaches a `cameraRoll` quick reply;
+ *               `chipLabel` overrides the status-chip headline (default "แจ้งเตือน").
  * @returns a LINE flex message object (with an optional `cameraRoll` quick reply).
  */
 export function buildBlockNoticeCard(
   reason: string,
-  opts?: { cameraRoll?: boolean }
+  opts?: { cameraRoll?: boolean; chipLabel?: string }
 ): object {
+  const chipLabel = opts?.chipLabel ?? 'แจ้งเตือน';
   const bubble = {
     type: 'bubble',
     body: {
@@ -207,7 +200,7 @@ export function buildBlockNoticeCard(
             },
             {
               type: 'text',
-              text: 'ไม่ผ่าน',
+              text: chipLabel,
               color: '#ffffff',
               weight: 'bold',
               size: 'sm',

@@ -15,7 +15,7 @@
  */
 
 import { verifySignature } from './line/signature';
-import { getProp, PROP_KEYS } from './config/props';
+import { getProp, getOptionalScriptProp, PROP_KEYS } from './config/props';
 import { getMessageContent, reply, startLoading } from './line/lineClient';
 import { logToSheet } from './sheet/sheetLog';
 import { getRecognizer } from './ocr/ocrClient';
@@ -23,7 +23,6 @@ import { evaluateSubmissionRules } from './rules/rulePipeline';
 import { buildRejectCard, buildBlockNoticeCard } from './line/flex/reject';
 import { buildSuccessCard } from './line/flex/success';
 import { buildTriggerCard } from './line/flex/trigger';
-import { buildSummaryCard } from './line/flex/summary';
 // Re-exported so the Rollup footer can expose it as an editor-runnable global
 // (owner runs it once to install the rich-menu).
 export { registerRichMenu } from './line/richMenu';
@@ -40,6 +39,8 @@ import { rateLimitAllows } from './rules/rateLimit';
 import { sha256Hex, isDuplicateImage } from './rules/imageDedup';
 import { bumpFailCount, shouldOfferDispute } from './rules/disputeGuard';
 import { withScriptLock } from './state/lock';
+import { isSummaryTextTrigger } from './summary/textTrigger';
+import { renderUserSummaryCard } from './summary/renderUserSummary';
 
 /** User-facing coach line when OCR fails/times out (PLAN Phase 1 line 53). */
 const OCR_ERROR_TEXT = 'อ่านรูปไม่สำเร็จ ลองใหม่';
@@ -51,8 +52,7 @@ const COOLDOWN_TEXT = 'ส่งบ่อยเกินไป รอสัก�
 const DUPLICATE_IMAGE_TEXT = 'รูปนี้เคยส่งแล้ว';
 /** User-facing line when the script lock times out on the write path (Phase 3). */
 const LOCK_TIMEOUT_TEXT = 'ระบบไม่ว่าง ลองใหม่';
-/** Error/reject semantic color reused for the OCR-error card. */
-const ERROR_COLOR = '#d64545';
+import { ERROR_COLOR } from './line/flex/tokens';
 /** User-facing ack shown after a dispute is logged (Phase 5). */
 const DISPUTE_ACK_TEXT = 'ส่งเรื่องให้แอดมินตรวจสอบแล้ว';
 /** Postback `action` value for the dispute quick-reply (Phase 5). */
@@ -72,13 +72,18 @@ export interface LineWebhookEvent {
   type: string;
   replyToken?: string;
   source?: { userId?: string };
-  message?: { id: string; type: string };
+  message?: { id: string; type: string; text?: string };
   postback?: { data: string };
 }
 
 /** LINE webhook request body: an array of events under `events`. */
 export interface LineWebhookBody {
   events?: LineWebhookEvent[];
+}
+
+/** True when Script Property `DIAG_ENABLED=1` (webhook delivery tracer). */
+function isDiagEnabled(): boolean {
+  return getOptionalScriptProp('DIAG_ENABLED') === '1';
 }
 
 /** LINE's signature header, case-insensitively. GAS may expose it either on
@@ -114,16 +119,17 @@ export function doPost(
   const sp = PropertiesService.getScriptProperties();
   try {
     const body = e?.postData?.contents ?? '';
-    // DELIVERY TRACER (debug "silent bot"): record that doPost was reached,
-    // BEFORE anything can throw, so `doGet` can report whether LINE is actually
-    // delivering webhooks (DIAG_LAST_HIT updates) + what arrived.
-    sp.setProperties({
-      DIAG_LAST_HIT: new Date().toISOString(),
-      DIAG_HIT_COUNT: String(
-        parseInt(sp.getProperty('DIAG_HIT_COUNT') ?? '0', 10) + 1
-      ),
-      DIAG_LAST_EVENTS: summariseEvents(body),
-    });
+    // Optional delivery tracer (debug "silent bot") — off by default; set
+    // DIAG_ENABLED=1 in Script Properties to turn on.
+    if (isDiagEnabled()) {
+      sp.setProperties({
+        DIAG_LAST_HIT: new Date().toISOString(),
+        DIAG_HIT_COUNT: String(
+          parseInt(sp.getProperty('DIAG_HIT_COUNT') ?? '0', 10) + 1
+        ),
+        DIAG_LAST_EVENTS: summariseEvents(body),
+      });
+    }
 
     const signature = readSignatureHeader(e);
     const channelSecret = getProp(PROP_KEYS.LINE_CHANNEL_SECRET);
@@ -140,10 +146,12 @@ export function doPost(
     const sigOk = signature
       ? verifySignature(body, signature, channelSecret)
       : true;
-    sp.setProperty(
-      'DIAG_LAST_SIG',
-      signature ? (sigOk ? 'ok' : 'fail') : 'skipped(no-header)'
-    );
+    if (isDiagEnabled()) {
+      sp.setProperty(
+        'DIAG_LAST_SIG',
+        signature ? (sigOk ? 'ok' : 'fail') : 'skipped(no-header)'
+      );
+    }
 
     if (sigOk) {
       // Route each event. Never throw out of here; any handler failure is
@@ -156,15 +164,17 @@ export function doPost(
     }
   } catch (err) {
     // doPost must never throw out — LINE always gets a 200 TextOutput.
-    try {
-      sp.setProperty(
-        'DIAG_LAST_ERROR',
-        `${new Date().toISOString()} ${
-          err instanceof Error ? err.message : String(err)
-        }`
-      );
-    } catch (diagErr) {
-      Logger.log(`doPost diag write failed: ${diagErr}`);
+    if (isDiagEnabled()) {
+      try {
+        sp.setProperty(
+          'DIAG_LAST_ERROR',
+          `${new Date().toISOString()} ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+      } catch (diagErr) {
+        Logger.log(`doPost diag write failed: ${diagErr}`);
+      }
     }
     Logger.log(`doPost error: ${err instanceof Error ? err.message : err}`);
   }
@@ -194,8 +204,9 @@ function summariseEvents(body: string): string {
  *
  * Dispatch map:
  *   - `message` + `message.type === 'image'` -> `handleImageMessage` (Phase 1)
+ *   - `message` + `message.type === 'text'`  -> `handleTextMessage` (CR-2 summary trigger)
  *   - `postback`                             -> `handlePostback` (Phase 2)
- *   - anything else (text/sticker/...)       -> graceful ignore (log only)
+ *   - anything else (sticker/...)            -> graceful ignore (log only)
  *
  * Handler errors are swallowed here so one bad event never fails doPost's 200.
  *
@@ -229,6 +240,7 @@ export function routeWebhook(rawBody: string): void {
 /**
  * Route a single event to its handler.
  *   - `message`(image) -> handleImageMessage (Phase 1)
+ *   - `message`(text)  -> handleTextMessage (CR-2)
  *   - `postback`       -> handlePostback (Phase 2)
  *   - anything else    -> graceful ignore (log only)
  */
@@ -237,11 +249,15 @@ function dispatchEvent(event: LineWebhookEvent): void {
     handleImageMessage(event);
     return;
   }
+  if (event.type === 'message' && event.message?.type === 'text') {
+    handleTextMessage(event);
+    return;
+  }
   if (event.type === 'postback') {
     handlePostback(event);
     return;
   }
-  // Text, sticker, follow, etc. — graceful ignore (no OCR, no reply).
+  // Sticker, follow, etc. — graceful ignore (no OCR, no reply).
   Logger.log(`routeWebhook: ignoring event type "${event.type}".`);
 }
 
@@ -255,7 +271,33 @@ function buildErrorCard(): object {
       body: {
         type: 'box',
         layout: 'vertical',
+        spacing: 'md',
         contents: [
+          {
+            type: 'box',
+            layout: 'baseline',
+            spacing: 'sm',
+            paddingAll: '8px',
+            cornerRadius: '4px',
+            backgroundColor: ERROR_COLOR,
+            contents: [
+              {
+                type: 'text',
+                text: '[!]',
+                color: '#ffffff',
+                weight: 'bold',
+                size: 'sm',
+                flex: 0,
+              },
+              {
+                type: 'text',
+                text: 'อ่านรูปไม่สำเร็จ',
+                color: '#ffffff',
+                weight: 'bold',
+                size: 'sm',
+              },
+            ],
+          },
           {
             type: 'text',
             text: OCR_ERROR_TEXT,
@@ -310,7 +352,10 @@ export function handleImageMessage(event: LineWebhookEvent): void {
     // limit → cooldown notice, do NOT compute the hash or call OCR (Phase 3).
     if (!rateLimitAllows(userId)) {
       reply(replyToken, [
-        buildBlockNoticeCard(COOLDOWN_TEXT, { cameraRoll: true }),
+        buildBlockNoticeCard(COOLDOWN_TEXT, {
+          cameraRoll: true,
+          chipLabel: 'กรุณารอ',
+        }),
       ]);
       logToSheet('info', 'blocked_ratelimit', userId, messageId);
       return;
@@ -322,7 +367,10 @@ export function handleImageMessage(event: LineWebhookEvent): void {
     const imageHash = sha256Hex(blob);
     if (isDuplicateImage(imageHash)) {
       reply(replyToken, [
-        buildBlockNoticeCard(DUPLICATE_IMAGE_TEXT, { cameraRoll: true }),
+        buildBlockNoticeCard(DUPLICATE_IMAGE_TEXT, {
+          cameraRoll: true,
+          chipLabel: 'รูปซ้ำ',
+        }),
       ]);
       logToSheet('info', 'blocked_duplicate', userId, messageId, imageHash);
       return;
@@ -381,7 +429,7 @@ export function handleImageMessage(event: LineWebhookEvent): void {
         });
         const counts = countSubmissions(userId, todayISO);
         const daily = recentDailyValues(userId, todayISO);
-        reply(replyToken, [buildSuccessCard(ctx, counts, daily)]);
+        reply(replyToken, [buildSuccessCard(ctx, counts, daily, todayISO)]);
         logToSheet(
           'info',
           'recorded',
@@ -400,7 +448,9 @@ export function handleImageMessage(event: LineWebhookEvent): void {
         );
         reply(replyToken, [
           isLockTimeout(writeErr)
-            ? buildBlockNoticeCard(LOCK_TIMEOUT_TEXT)
+            ? buildBlockNoticeCard(LOCK_TIMEOUT_TEXT, {
+                chipLabel: 'ระบบไม่ว่าง',
+              })
             : buildSheetErrorCard(),
         ]);
         logToSheet(
@@ -490,10 +540,7 @@ function parsePostbackField(
  * SCAFFOLD (Phase 5): stub only — body throws NotImplemented.
  */
 function buildDisputeAckCard(): object {
-  // Neutral info style (blue-grey) — nothing failed; the report reached the
-  // admin. A CSS-glyph mark ([i]) + label carries the meaning (WCAG: not colour
-  // alone). No button, no quick reply, no emoji.
-  const INFO_COLOR = '#3b6ea5';
+  const INFO_COLOR = '#2f6fed';
   return {
     type: 'flex',
     altText: DISPUTE_ACK_TEXT,
@@ -549,7 +596,33 @@ function buildSheetErrorCard(): object {
       body: {
         type: 'box',
         layout: 'vertical',
+        spacing: 'md',
         contents: [
+          {
+            type: 'box',
+            layout: 'baseline',
+            spacing: 'sm',
+            paddingAll: '8px',
+            cornerRadius: '4px',
+            backgroundColor: ERROR_COLOR,
+            contents: [
+              {
+                type: 'text',
+                text: '[!]',
+                color: '#ffffff',
+                weight: 'bold',
+                size: 'sm',
+                flex: 0,
+              },
+              {
+                type: 'text',
+                text: 'บันทึกไม่สำเร็จ',
+                color: '#ffffff',
+                weight: 'bold',
+                size: 'sm',
+              },
+            ],
+          },
           {
             type: 'text',
             text: SHEET_ERROR_TEXT,
@@ -560,7 +633,42 @@ function buildSheetErrorCard(): object {
         ],
       },
     },
+    quickReply: {
+      items: [
+        {
+          type: 'action',
+          action: { type: 'cameraRoll', label: 'ส่งรูปใหม่' },
+        },
+      ],
+    },
   };
+}
+
+/**
+ * Text-message handler (CR-2): substring `"สรุป"` → on-demand summary card.
+ * Other text is ignored gracefully (no reply). Never throws out.
+ */
+export function handleTextMessage(event: LineWebhookEvent): void {
+  const replyToken = event.replyToken;
+  if (!replyToken) {
+    Logger.log('handleTextMessage: missing replyToken; ignoring.');
+    return;
+  }
+  const text = event.message?.text ?? '';
+  if (!isSummaryTextTrigger(text)) {
+    Logger.log('handleTextMessage: non-summary text; ignoring.');
+    return;
+  }
+  const userId = event.source?.userId ?? '';
+  try {
+    reply(replyToken, [renderUserSummaryCard(userId)]);
+  } catch (err) {
+    Logger.log(
+      `handleTextMessage: summary failed — ${
+        err instanceof Error ? err.message : err
+      }`
+    );
+  }
 }
 
 /**
@@ -628,14 +736,7 @@ export function handlePostback(event: LineWebhookEvent): void {
   if (action === SUMMARY_ACTION) {
     const userId = event.source?.userId ?? '';
     try {
-      const todayISO = Utilities.formatDate(
-        new Date(),
-        'Asia/Bangkok',
-        'yyyy-MM-dd'
-      );
-      const counts = countSubmissions(userId, todayISO);
-      const daily = recentDailyValues(userId, todayISO);
-      reply(replyToken, [buildSummaryCard(counts, daily)]);
+      reply(replyToken, [renderUserSummaryCard(userId)]);
     } catch (err) {
       Logger.log(
         `handlePostback: summary failed — ${
@@ -706,18 +807,18 @@ export function doGet(): GoogleAppsScript.Content.TextOutput {
       SHEET_ID: has('SHEET_ID'),
     },
     ocrMode: has('OCR_BASE_URL') && has('OCR_TOKEN') ? 'real' : 'mock',
-    // Webhook-delivery tracer (written by doPost on every hit): if `lastHit`
-    // updates after LINE sends a message, delivery works; if not, LINE is not
-    // reaching us. `lastSig` = did the signature verify; `lastEvents` = what
-    // event types arrived.
-    diag: {
-      lastHit: raw('DIAG_LAST_HIT'),
-      hitCount: raw('DIAG_HIT_COUNT'),
-      lastSig: raw('DIAG_LAST_SIG'),
-      lastEvents: raw('DIAG_LAST_EVENTS'),
-      lastError: raw('DIAG_LAST_ERROR'),
-    },
   };
+  if (isDiagEnabled()) {
+    Object.assign(health, {
+      diag: {
+        lastHit: raw('DIAG_LAST_HIT'),
+        hitCount: raw('DIAG_HIT_COUNT'),
+        lastSig: raw('DIAG_LAST_SIG'),
+        lastEvents: raw('DIAG_LAST_EVENTS'),
+        lastError: raw('DIAG_LAST_ERROR'),
+      },
+    });
+  }
   return ContentService.createTextOutput(
     JSON.stringify(health, null, 2)
   ).setMimeType(ContentService.MimeType.JSON);
@@ -766,11 +867,30 @@ export function setupProject(): void {
 
   props.setProperty('SHEET_ID', ss.getId());
   props.setProperty('OCR_BASE_URL', 'https://fit-ocr.istartsoft.dev');
+  // Prod default: allow weekend catch-up (Mon submit for Sat/Sun workout).
+  if (!props.getProperty('MAX_BACKDATE_DAYS')) {
+    props.setProperty('MAX_BACKDATE_DAYS', '2');
+  }
 
   Logger.log('SETUP DONE — SHEET_ID=' + ss.getId());
   Logger.log('Sheet URL=' + ss.getUrl());
   Logger.log(
     'Now set the SECRETS in Project Settings > Script Properties: ' +
       'LINE_CHANNEL_SECRET, LINE_CHANNEL_ACCESS_TOKEN, OCR_TOKEN',
+  );
+}
+
+/**
+ * Owner-runnable prod defaults — run once from the Apps Script editor after deploy.
+ * Sets `MAX_BACKDATE_DAYS=2` when unset (weekend catch-up). Does NOT touch secrets.
+ */
+export function setProdDefaults(): void {
+  const props = PropertiesService.getScriptProperties();
+  if (!props.getProperty('MAX_BACKDATE_DAYS')) {
+    props.setProperty('MAX_BACKDATE_DAYS', '2');
+  }
+  Logger.log(
+    'setProdDefaults done — MAX_BACKDATE_DAYS=' +
+      (props.getProperty('MAX_BACKDATE_DAYS') ?? '1')
   );
 }

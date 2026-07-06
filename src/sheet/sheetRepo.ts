@@ -343,7 +343,8 @@ export function ensureEmployee(userId: string, name: string): void {
  *
  * @param userId   LINE user id to tally.
  * @param todayISO today's date (`yyyy-MM-dd`, Asia/Bangkok) anchoring the windows.
- * @returns week / month / total recorded counts for the user.
+ * @returns week / month / total counts of DISTINCT recorded activity days for the
+ *          user (multiple workouts on one day count once — "1 วัน = 1 ครั้ง").
  *
  * SCAFFOLD (Phase 5): signature only — body throws NotImplemented.
  */
@@ -364,25 +365,28 @@ export function countSubmissions(
   const monday = mondayOfWeek(todayISO); // yyyy-MM-dd of this week's Monday
   const monthPrefix = todayISO.slice(0, 7); // yyyy-MM
 
-  let week = 0;
-  let month = 0;
-  let total = 0;
+  // Count DISTINCT activity DAYS per bucket, not rows: two workouts on the same
+  // day count once ("1 วัน = 1 ครั้ง", owner-approved 2026-07-05). Duplicate rows
+  // are still stored (calories preserved for the chart); only the tally collapses.
+  const weekDays = new Set<string>();
+  const monthDays = new Set<string>();
+  const totalDays = new Set<string>();
   // Skip the header (index 0). Count RECORDED rows for THIS user only.
   for (let i = 1; i < rows.length; i++) {
     if (rows[i][userIdCol] !== userId) continue;
     if (rows[i][statusCol] !== STATUS_RECORDED) continue;
     const date = dateOnly(rows[i][dateCol]);
-    total++;
+    totalDays.add(date);
     if (date.slice(0, 7) === monthPrefix) {
-      month++;
+      monthDays.add(date);
     }
     // In-week = Monday(this week) <= date <= today (date-only string compare is
     // valid for yyyy-MM-dd).
     if (date >= monday && date <= todayISO) {
-      week++;
+      weekDays.add(date);
     }
   }
-  return { week, month, total };
+  return { week: weekDays.size, month: monthDays.size, total: totalDays.size };
 }
 
 /**
@@ -457,8 +461,20 @@ function calorieValue(active: unknown, totalKcal: unknown): number {
   return t !== null ? t : 0;
 }
 
-/** Date-only (`yyyy-MM-dd`) of a cell that may be a full ISO datetime. */
+/**
+ * Date-only (`yyyy-MM-dd`) of a cell that may be an ISO string OR a JS `Date`.
+ *
+ * Google Sheets auto-coerces a written `"yyyy-MM-dd"` string into a date value,
+ * so `getValues()` hands it back as a `Date` (not a string). `String(date)` is
+ * `"Sat Jul 04 2026 …"` — no `'T'` — which used to leak through `.split('T')[0]`
+ * and never match a `yyyy-MM-dd` window, silently zeroing week/month counts and
+ * the chart while `total` (unconditional) stayed correct. Format any `Date` in
+ * Asia/Bangkok (the sheet's timezone) to recover the intended calendar day.
+ */
 function dateOnly(cell: unknown): string {
+  if (cell instanceof Date) {
+    return Utilities.formatDate(cell, 'Asia/Bangkok', 'yyyy-MM-dd');
+  }
   return String(cell).split('T')[0];
 }
 

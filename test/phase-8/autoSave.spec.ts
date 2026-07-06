@@ -58,6 +58,8 @@ const mockedPipeline = rulePipeline as jest.Mocked<typeof rulePipeline>;
 
 const IMAGE_HASH = 'abc123'.repeat(2) + 'ff'.repeat(26); // 64-hex-like marker
 const ROSTER_NAME = 'สมชาย';
+/** Pin "today" so week/month counts don't drift with the runner's clock. */
+const FIXED_TODAY = '2026-07-08'; // Wed; week Mon..today includes this date
 
 /** A minimal fake image blob standing in for LINE getContent output. */
 function fakeBlob(): any {
@@ -183,6 +185,30 @@ function imageEvent(messageId = 'msg-100', userId = 'U1'): LineWebhookEvent {
 beforeEach(() => {
   jest.clearAllMocks();
   installEnv();
+  // main.ts computes todayISO via formatDate(new Date(), 'Asia/Bangkok', 'yyyy-MM-dd').
+  // Pin it so the "week ≥ 1" assertion is stable regardless of runner clock.
+  g.Utilities.formatDate.mockImplementation(
+    (date: Date, timeZone: string, pattern: string): string => {
+      if (pattern === 'yyyy-MM-dd' && timeZone === 'Asia/Bangkok') {
+        return FIXED_TODAY;
+      }
+      const offsetMs = timeZone === 'Asia/Bangkok' ? 7 * 60 * 60 * 1000 : 0;
+      const shifted = new Date(date.getTime() + offsetMs);
+      const yyyy = String(shifted.getUTCFullYear()).padStart(4, '0');
+      const MM = String(shifted.getUTCMonth() + 1).padStart(2, '0');
+      const dd = String(shifted.getUTCDate()).padStart(2, '0');
+      const HH = String(shifted.getUTCHours()).padStart(2, '0');
+      const mm = String(shifted.getUTCMinutes()).padStart(2, '0');
+      const ss = String(shifted.getUTCSeconds()).padStart(2, '0');
+      return pattern
+        .replace(/yyyy/g, yyyy)
+        .replace(/MM/g, MM)
+        .replace(/dd/g, dd)
+        .replace(/HH/g, HH)
+        .replace(/mm/g, mm)
+        .replace(/ss/g, ss);
+    }
+  );
   mockedLine.getMessageContent.mockReturnValue(fakeBlob());
   mockedLine.reply.mockImplementation(() => undefined);
   // Pre-OCR gates PASS; sha256Hex yields the imageHash marker asserted on the row.
@@ -194,7 +220,10 @@ beforeEach(() => {
   jest
     .spyOn(ocrMock, 'recognize')
     .mockReturnValue(
-      makeOcrMetrics({ activeCaloriesKcal: 200, activityDateISO: '2026-07-04' })
+      makeOcrMetrics({
+        activeCaloriesKcal: 200,
+        activityDateISO: FIXED_TODAY,
+      })
     );
 });
 

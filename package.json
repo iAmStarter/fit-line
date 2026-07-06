@@ -15,7 +15,9 @@
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\"",
     "push": "npm run build && clasp push",
-    "logs": "clasp logs"
+    "logs": "clasp logs",
+    "richmenu:image": "python3 scripts/generate-richmenu-image.py && node -e \"const fs=require('fs');const b64=fs.readFileSync('assets/richmenu-summary-800x540.png').toString('base64');fs.writeFileSync('src/line/richMenuImageData.ts','/** Auto-generated — npm run richmenu:image */\\nexport const RICH_MENU_IMAGE_BASE64='+JSON.stringify(b64)+';\\n');\"",
+    "richmenu:register": "node scripts/register-richmenu.mjs"
   },
   "devDependencies": {
     "@google/clasp": "^2.4.2",
